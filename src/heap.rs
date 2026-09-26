@@ -2,6 +2,9 @@ use std::collections::BTreeMap;
 
 use crate::context::{ContextId, ContextItem, ScopeId};
 
+mod pinned;
+pub use pinned::{PinnedEntry, PinnedError, PinnedId, PinnedZone};
+
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum ZoneKind {
     Eden,
@@ -229,10 +232,11 @@ impl<Data> ContextHeapSpace<Data> {
 #[derive(Debug)]
 pub struct ContextHeap<Data = ()> {
     zones: [ContextHeapSpace<Data>; 5],
+    pinned: PinnedZone,
 }
 
 impl<Data> ContextHeap<Data> {
-    pub fn new(watermarks: [Watermark; 5]) -> Option<Self> {
+    pub fn new(watermarks: [Watermark; 5], pinned_capacity: usize) -> Option<Self> {
         if watermarks.iter().any(|mark| !mark.valid()) {
             return None;
         }
@@ -240,7 +244,16 @@ impl<Data> ContextHeap<Data> {
             zones: std::array::from_fn(|index| {
                 ContextHeapSpace::new(ZoneKind::ALL[index], watermarks[index])
             }),
+            pinned: PinnedZone::new(pinned_capacity),
         })
+    }
+
+    pub fn pinned(&self) -> &PinnedZone {
+        &self.pinned
+    }
+
+    pub(crate) fn pinned_mut(&mut self) -> &mut PinnedZone {
+        &mut self.pinned
     }
 
     pub fn zone(&self, kind: ZoneKind) -> &ContextHeapSpace<Data> {

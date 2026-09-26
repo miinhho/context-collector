@@ -17,6 +17,8 @@ InfoRefiner·ScopeSummarizer·Backing을 주입한다. 실제 Agent 보고나 �
 - `tests/agent_view.rs`: Heap 용량에 따른 Hot 대화의 보존과 역할·turn 순서,
   Zone별 View section 점유, Backing 정보의 `uses` 관측과 Scope 조회,
   명시적 Backing 재호출의 별도 전달량.
+- `tests/pinned_zone.rs`: 고정 내용의 정확한 전달·순서·계측, Scope 전환과
+  Collection 독립성, 삽입 용량 및 명시적 제거.
 
 검사는 공개 조회 결과와 실패 시 상태 보존을 본다. ScopeBlock의 내부 배치,
 Agent 보고의 의미적 타당성, Info 가공의 유용성, Scope 요약의 충실성은 이

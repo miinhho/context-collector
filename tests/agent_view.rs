@@ -38,6 +38,7 @@ fn runtime() -> Runtime {
     Runtime::with_counter(
         RuntimeConfig {
             watermarks: [Watermark { low: 1, high: 4 }; 5],
+            pinned_capacity: 0,
             hot_high: 100,
             processing_batch_tokens: 1024,
             max_processing_failures: 2,
@@ -57,6 +58,7 @@ fn wide_runtime() -> Runtime {
                 low: 500,
                 high: 1000,
             }; 5],
+            pinned_capacity: 0,
             hot_high: 4000,
             processing_batch_tokens: 1024,
             max_processing_failures: 2,

@@ -20,8 +20,8 @@ pub use context::{
     ContextId, ContextItem, Info, InfoKind, MessageOrigin, MessageRole, ProcessingAttempt,
     ProcessingFailure, ProcessingState, RawInfo, ScopeId, SourceSpan,
 };
-pub use heap::{TokenUsage, Watermark, ZoneKind};
+pub use heap::{PinnedEntry, PinnedError, PinnedId, TokenUsage, Watermark, ZoneKind};
 pub use runtime::Runtime;
 pub use runtime::{RuntimeConfig, RuntimeError, ScopeReport, TurnObservation};
 pub use token::{TiktokenCounter, TokenCounter};
-pub use view::{ContextView, ViewSectionUsage, ViewUsage};
+pub use view::{ContextView, PinnedViewUsage, ViewSectionUsage, ViewUsage};

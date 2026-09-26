@@ -14,8 +14,18 @@ use super::{ContextView, ViewMessage, ViewNote, note_for_item};
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ViewUsage {
     pub total: usize,
+    pub pinned: PinnedViewUsage,
     pub sections: BTreeMap<ZoneKind, ViewSectionUsage>,
     pub recalled: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PinnedViewUsage {
+    /// Tokens after joining caller-authored fragments for delivery.
+    pub rendered_tokens: usize,
+    /// Sum of individually counted entry payloads used for admission.
+    pub stored_tokens: usize,
+    pub capacity: usize,
 }
 
 impl ViewUsage {
@@ -74,6 +84,9 @@ impl ViewSection {
 
 /// A read-only projection. Sections account for delivery, not Zone ownership.
 pub(crate) struct ViewSpace {
+    pinned: Vec<String>,
+    pinned_stored: usize,
+    pinned_capacity: usize,
     sections: BTreeMap<ZoneKind, ViewSection>,
 }
 
@@ -167,7 +180,17 @@ impl ViewSpace {
             }
         }
 
-        Self { sections }
+        Self {
+            pinned: heap
+                .pinned()
+                .entries()
+                .iter()
+                .map(|entry| entry.content.clone())
+                .collect(),
+            pinned_stored: heap.pinned().usage(),
+            pinned_capacity: heap.pinned().capacity(),
+            sections,
+        }
     }
 
     pub(crate) fn view(&self) -> ContextView {
@@ -185,6 +208,7 @@ impl ViewSpace {
             .collect::<Vec<_>>();
         notes.extend(self.sections[&ZoneKind::Cold].summaries.iter().cloned());
         ContextView {
+            pinned: self.pinned.clone(),
             notes,
             messages,
             ..ContextView::default()
@@ -209,6 +233,11 @@ impl ViewSpace {
             .collect();
         ViewUsage {
             total: counter.count(&self.view().markdown()),
+            pinned: PinnedViewUsage {
+                rendered_tokens: counter.count(&self.pinned.join("\n\n")),
+                stored_tokens: self.pinned_stored,
+                capacity: self.pinned_capacity,
+            },
             sections,
             recalled: 0,
         }

@@ -17,6 +17,7 @@ pub struct ColdCatalogEntry {
     pub revision: u64,
     pub tokens: usize,
     pub location: CatalogLocation,
+    pub last_used_turn: Option<u64>,
     pub processing: ProcessingState,
 }
 
@@ -70,6 +71,7 @@ impl<SummaryData> ColdCatalog<SummaryData> {
                 revision: entry.item.revision,
                 tokens: entry.tokens,
                 location: CatalogLocation::ColdZone,
+                last_used_turn: entry.last_used_turn,
                 processing: entry.item.processing.clone(),
             },
         );
@@ -87,6 +89,12 @@ impl<SummaryData> ColdCatalog<SummaryData> {
             .get_mut(&id)
             .expect("Cold entry was registered")
             .processing = processing;
+    }
+
+    pub(crate) fn record_use(&mut self, id: ContextId, turn: u64) {
+        if let Some(entry) = self.entries.get_mut(&id) {
+            entry.last_used_turn = Some(turn);
+        }
     }
 
     pub(crate) fn add_summary(&mut self, scope: ScopeId, summary: ScopeSummary<SummaryData>) {

@@ -160,18 +160,15 @@ async fn info_refinement_keeps_raw_exact_and_tracks_both_token_kinds() {
     assert_eq!(original.kind, InfoKind::Raw("αbc".into()));
     let view = runtime.context_view(TokenSpace(300), &[]).await.unwrap();
     let extracted: Vec<_> = view
-        .items
+        .notes
         .iter()
-        .filter(|item| match &item.item.kind {
-            InfoKind::Info(info) => info.sources.iter().any(|source| source.raw == first.user),
-            _ => false,
-        })
+        .filter(|note| note.sources.contains(&first.user))
         .collect();
     assert!(!extracted.is_empty());
-    assert!(extracted.iter().all(|item| item.scope == first.scope));
-    for item in extracted {
-        assert!(item.zone.is_some());
-        let usage = runtime.zone_usage(item.zone.unwrap()).await;
+    assert!(extracted.iter().all(|note| note.scope == first.scope));
+    for note in extracted {
+        let zone = runtime.zone_of(note.id.unwrap()).await.unwrap();
+        let usage = runtime.zone_usage(zone).await;
         assert!(usage.raw > 0 && usage.info > 0);
     }
 }
@@ -235,26 +232,17 @@ async fn cold_catalog_and_backing_preserve_exact_raw_and_scoped_summary() {
         backing.load(first.user).unwrap().unwrap().kind,
         InfoKind::Raw("source payload".into())
     );
+    runtime.select_scope(first.scope).await.unwrap();
     let view = runtime
         .context_view(TokenSpace(500), &[first.user])
         .await
         .unwrap();
+    assert!(view.notes.iter().any(|note| note.id == Some(first.user)));
     assert!(
-        view.items
+        view.notes
             .iter()
-            .any(|item| item.item.id == first.user && item.zone.is_none())
-    );
-    let scope = view
-        .cold_scopes
-        .iter()
-        .find(|entry| entry.scope == first.scope)
-        .unwrap();
-    assert!(
-        scope
-            .summaries
-            .iter()
-            .any(|summary| summary.content == "opaque scope summary"
-                && summary.references.contains(&first.user))
+            .any(|note| note.content == "opaque scope summary"
+                && note.coverage.contains(&first.user))
     );
     assert!(view.used_tokens <= 500);
 }

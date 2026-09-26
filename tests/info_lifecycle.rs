@@ -229,27 +229,20 @@ async fn settled_raw_is_not_refined_again_in_the_same_hot_lifecycle() {
             .hot_refinement
             .completed
     );
-    let compact_view = runtime
-        .context_view(
-            context_collector::TokenSpace("refined information".len()),
-            &[],
-        )
-        .await
-        .unwrap();
-    assert!(
-        compact_view
-            .items
-            .iter()
-            .any(|item| matches!(item.item.kind, context_collector::InfoKind::Info(_)))
-    );
     let full_view = runtime
         .context_view(context_collector::TokenSpace(1000), &[])
         .await
         .unwrap();
     assert!(
         full_view
-            .items
+            .notes
             .iter()
-            .any(|item| item.item.id == first.user)
+            .any(|note| note.content == "refined information")
+    );
+    assert!(
+        full_view
+            .messages
+            .iter()
+            .any(|message| message.id == first.user)
     );
 }

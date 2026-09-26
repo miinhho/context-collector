@@ -17,8 +17,8 @@ pub use compaction::scope_summary::{
     NoopScopeSummarizer, ScopeSummarizer, ScopeSummaryInput, ScopeSummaryProposal,
 };
 pub use context::{
-    ContextId, ContextItem, Info, InfoKind, ProcessingAttempt, ProcessingFailure, ProcessingState,
-    RawInfo, ScopeId, SourceSpan,
+    ContextId, ContextItem, Info, InfoKind, MessageOrigin, MessageRole, ProcessingAttempt,
+    ProcessingFailure, ProcessingState, RawInfo, ScopeId, SourceSpan,
 };
 pub use heap::{TokenUsage, Watermark, ZoneKind};
 pub use runtime::Runtime;

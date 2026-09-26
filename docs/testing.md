@@ -14,6 +14,8 @@ InfoRefiner·ScopeSummarizer·Backing을 주입한다. 실제 Agent 보고나 �
 - `tests/info_lifecycle.rs`: Cold watermark 이전 Scope 요약, 반복된 요약 부재의
   실패 상태와 정확한 원본 Backing, 완료된 RawInfo의 중복 Hot 가공 방지.
 - `tests/token_counter.rs`: `o200k_base` token 계측과 바이트 길이가 다른 입력.
+- `tests/agent_view.rs`: Raw 대화의 역할·turn 순서, 렌더링한 Markdown의 예산,
+  Backing 정보의 `uses` 관측과 Scope 조회, 명시적 요청의 예산 부족 보고.
 
 검사는 공개 조회 결과와 실패 시 상태 보존을 본다. ScopeBlock의 내부 배치,
 Agent 보고의 의미적 타당성, Info 가공의 유용성, Scope 요약의 충실성은 이

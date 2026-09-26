@@ -141,15 +141,14 @@ async fn user_data_survives_refinement_cold_backing_and_catalog_retrieval() {
         .context_view(context_collector::TokenSpace(1000), &[])
         .await
         .unwrap()
-        .items
+        .notes
         .into_iter()
-        .find_map(|item| match item.item.kind {
-            InfoKind::Info(info) if info.sources.iter().any(|source| source.raw == first.user) => {
-                Some(item.item.id)
-            }
-            _ => None,
-        })
+        .find(|note| note.sources.contains(&first.user))
+        .and_then(|note| note.id)
         .expect("user typed proposal was accepted");
+    let evidence = runtime.evidence_markdown(info_id).await.unwrap().unwrap();
+    assert!(evidence.contains(&format!("근거 #{}", first.user.0)));
+    assert!(evidence.contains("> s"));
     runtime
         .complete_turn(
             "other".into(),
@@ -435,16 +434,9 @@ async fn changing_user_metadata_does_not_duplicate_the_same_grounded_info() {
         .context_view(context_collector::TokenSpace(1000), &[])
         .await
         .unwrap()
-        .items
+        .notes
         .into_iter()
-        .filter(|item| {
-            matches!(
-                &item.item.kind,
-                InfoKind::Info(info)
-                    if info.content == "same grounded fact"
-                        && info.sources.iter().any(|source| source.raw == first.user)
-            )
-        })
+        .filter(|note| note.content == "same grounded fact" && note.sources.contains(&first.user))
         .count();
     assert_eq!(same_fact_count, 1);
 }

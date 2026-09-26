@@ -61,7 +61,8 @@ Zone은 배치된 정보를 보관·조회하고 Scope별 묶음과 RawInfo·Inf
 
 - `RawInfo`는 Runtime이 수용한 정확한 원본이다. 새 사용자·Agent 출력은
   일반적으로 Eden에 RawInfo로 들어간다. 이동과 가공 뒤에도 원본 payload를
-  정확하게 다시 읽을 수 있다.
+  정확하게 다시 읽을 수 있다. 대화 메시지의 역할과 turn 순서는 정보와 함께
+  보존되어 Zone 이동과 Backing 뒤에도 복원할 수 있다.
 - `Info`는 RawInfo의 근거 구간에서 사용자가 가공한 정보다. 짧은 요약,
   추출, 재표현 등 목적에 맞는 결과가 될 수 있다. 독립적인 Memory 객체나
   정해진 필드 추출 스키마를 요구하지 않는다.
@@ -109,6 +110,27 @@ Agent는 메시지와 함께 turn 단위의 `uses`와 `scope`를 보고한다. R
 
 보고는 응답과 함께 도착하므로 이번 요청의 View에 소급 적용되지 않는다.
 다음 View와 Collection·Compaction 판단에 반영한다.
+
+### Agent에게 전달하는 Context
+
+View는 Runtime의 Zone·정보 형태·Scope 항목을 그대로 나열하지 않는다.
+선정된 원본 대화 메시지는 역할과 turn 순서를 지켜 전달하고, 관찰 뒤 얻은 Info와
+Cold 부분의 Scope 요약은 이전 대화를 이어주는 Markdown 내용으로 제공한다.
+표시된 정보와 근거에는 `#ID` 참조를 붙여 정확한 원본을 다시 읽을 수 있게 한다.
+현재 입력은 호출자가 요청에 함께 전달하며, 완료된 turn의 사용자·Agent 출력은
+Runtime의 RawInfo에서 다음 View를 구성한다.
+
+Scope 소속과 명시적 `uses`는 관련 내용을 선정하는 근거다. Hot·Cold와 Backing
+위치는 접근 경로와 예산 판단에 사용하며 Agent용 문구에 노출하지 않는다.
+Info의 근거 구간이나 Scope 요약의 반영 범위가 원본 전체의 의미적 대체를
+보증하지는 않는다. 원본이 View에 실리지 않아도 정확히 조회할 수 있어야 한다.
+Cold와 Backing에 있는 정보의 `uses`도 ColdCatalog에 관측으로 기록하지만
+보고했다는 이유만으로 Zone을 바꾸거나 본문을 다음 View에 강제로 포함하지 않는다.
+View의 token 사용량은 Agent에게 전달할 Markdown 표현을 기준으로 계측한다.
+호출자는 최근 사용 정보, Scope의 요약과 정보 참조, 개별 정보 및 Info의 원문
+근거를 필요할 때 조회할 수 있다. 조회 결과도 저장 위치를 드러내지 않는
+Markdown으로 표현하며, 원본 내용과 사용자 정의 데이터의 정확한 조회 계약은
+별도로 유지한다.
 
 ## Watermark와 실행 책임
 

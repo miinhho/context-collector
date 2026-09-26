@@ -446,7 +446,7 @@ async fn later_backing_revision_mismatch_is_not_returned_as_canonical() {
             .await,
         Err(RuntimeError::View(
             context_collector::view::ViewError::Invariant(
-                "backing returned wrong identity or revision"
+                "backing returned wrong identity, revision, or processing state"
             )
         ))
     ));

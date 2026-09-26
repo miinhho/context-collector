@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use crate::context::{ContextId, ScopeId};
@@ -18,20 +19,29 @@ pub struct ColdCatalogEntry {
     pub location: CatalogLocation,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ScopeSummary {
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ScopeSummary<SummaryData = ()> {
     pub content: String,
     pub references: Vec<ContextId>,
     pub coverage: Vec<(ContextId, u64)>,
+    pub data: SummaryData,
 }
 
-#[derive(Default)]
-pub struct ColdCatalog {
+pub struct ColdCatalog<SummaryData = ()> {
     entries: BTreeMap<ContextId, ColdCatalogEntry>,
-    summaries: BTreeMap<ScopeId, Vec<ScopeSummary>>,
+    summaries: BTreeMap<ScopeId, Vec<ScopeSummary<SummaryData>>>,
 }
 
-impl ColdCatalog {
+impl<SummaryData> Default for ColdCatalog<SummaryData> {
+    fn default() -> Self {
+        Self {
+            entries: BTreeMap::new(),
+            summaries: BTreeMap::new(),
+        }
+    }
+}
+
+impl<SummaryData> ColdCatalog<SummaryData> {
     pub fn get(&self, id: ContextId) -> Option<&ColdCatalogEntry> {
         self.entries.get(&id)
     }
@@ -46,11 +56,11 @@ impl ColdCatalog {
             .filter(move |entry| entry.scope == scope)
     }
 
-    pub fn summaries(&self, scope: ScopeId) -> &[ScopeSummary] {
+    pub fn summaries(&self, scope: ScopeId) -> &[ScopeSummary<SummaryData>] {
         self.summaries.get(&scope).map(Vec::as_slice).unwrap_or(&[])
     }
 
-    pub(crate) fn record_cold(&mut self, entry: &ZoneEntry) {
+    pub(crate) fn record_cold<Data>(&mut self, entry: &ZoneEntry<Data>) {
         self.entries.insert(
             entry.id,
             ColdCatalogEntry {
@@ -70,7 +80,7 @@ impl ColdCatalog {
             .location = CatalogLocation::Backing;
     }
 
-    pub(crate) fn add_summary(&mut self, scope: ScopeId, summary: ScopeSummary) {
+    pub(crate) fn add_summary(&mut self, scope: ScopeId, summary: ScopeSummary<SummaryData>) {
         self.summaries.entry(scope).or_default().push(summary);
     }
 }

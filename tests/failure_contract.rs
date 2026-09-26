@@ -1,10 +1,13 @@
+use context_collector::error::ExternalError;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use context_collector::cold::{CatalogLocation, ColdBacking};
-use context_collector::compaction::objectization::{Objectizer, RawInput, StructuredProposal};
+use context_collector::compaction::objectization::{
+    ObjectizationInput, Objectizer, StructuredProposal,
+};
 use context_collector::compaction::scope_summary::{
     ScopeSummarizer, ScopeSummaryInput, ScopeSummaryProposal,
 };
@@ -30,10 +33,10 @@ fn config() -> RuntimeConfig {
 
 struct FailingBacking;
 impl ColdBacking for FailingBacking {
-    fn store(&self, _object: &ContextObject) -> Result<(), String> {
-        Err("store failed".into())
+    fn store(&self, _object: &ContextObject) -> Result<(), ExternalError> {
+        Err(Arc::new(std::io::Error::other("store failed")))
     }
-    fn load(&self, _id: ContextId) -> Result<Option<ContextObject>, String> {
+    fn load(&self, _id: ContextId) -> Result<Option<ContextObject>, ExternalError> {
         Ok(None)
     }
 }
@@ -44,8 +47,9 @@ impl ScopeSummarizer for NoSummary {
         &'a self,
         _scope: ScopeId,
         _inputs: &'a [ScopeSummaryInput],
-    ) -> Pin<Box<dyn Future<Output = Result<Option<ScopeSummaryProposal>, String>> + Send + 'a>>
-    {
+    ) -> Pin<
+        Box<dyn Future<Output = Result<Option<ScopeSummaryProposal>, ExternalError>> + Send + 'a>,
+    > {
         Box::pin(async { Ok(None) })
     }
 }
@@ -59,14 +63,17 @@ impl ScopeSummarizer for PausedSummary {
         &'a self,
         _scope: ScopeId,
         inputs: &'a [ScopeSummaryInput],
-    ) -> Pin<Box<dyn Future<Output = Result<Option<ScopeSummaryProposal>, String>> + Send + 'a>>
-    {
+    ) -> Pin<
+        Box<dyn Future<Output = Result<Option<ScopeSummaryProposal>, ExternalError>> + Send + 'a>,
+    > {
         Box::pin(async move {
             self.entered.notify_one();
             self.release.notified().await;
             Ok(Some(ScopeSummaryProposal {
                 content: "summary".into(),
                 references: inputs.iter().map(|input| input.object.id).collect(),
+                covered: inputs.iter().map(|input| input.object.id).collect(),
+                data: (),
             }))
         })
     }
@@ -138,7 +145,12 @@ async fn backing_failure_keeps_cold_payload_and_catalog_location() {
             .maintenance_errors()
             .await
             .iter()
-            .any(|error| matches!(error, RuntimeError::ColdBacking(_)))
+            .any(|error| matches!(
+                error,
+                RuntimeError::ColdCompaction(context_collector::cold::ColdCompactorError::Backing(
+                    _
+                ))
+            ))
     );
 }
 
@@ -180,7 +192,14 @@ async fn protected_cold_candidate_cannot_commit_after_summary_started() {
             .maintenance_errors()
             .await
             .iter()
-            .any(|error| matches!(error, RuntimeError::Invariant("Cold candidate changed")))
+            .any(|error| matches!(
+                error,
+                RuntimeError::ColdCompaction(
+                    context_collector::cold::ColdCompactorError::Invariant(
+                        "Cold candidate changed"
+                    )
+                )
+            ))
     );
 }
 
@@ -189,14 +208,14 @@ struct CorruptReloadBacking {
     stored: Mutex<std::collections::BTreeMap<ContextId, ContextObject>>,
 }
 impl ColdBacking for CorruptReloadBacking {
-    fn store(&self, object: &ContextObject) -> Result<(), String> {
+    fn store(&self, object: &ContextObject) -> Result<(), ExternalError> {
         self.stored
             .lock()
             .unwrap()
             .insert(object.id, object.clone());
         Ok(())
     }
-    fn load(&self, id: ContextId) -> Result<Option<ContextObject>, String> {
+    fn load(&self, id: ContextId) -> Result<Option<ContextObject>, ExternalError> {
         Ok(self
             .stored
             .lock()
@@ -216,12 +235,15 @@ impl ScopeSummarizer for BadReferenceSummary {
         &'a self,
         _scope: ScopeId,
         _inputs: &'a [ScopeSummaryInput],
-    ) -> Pin<Box<dyn Future<Output = Result<Option<ScopeSummaryProposal>, String>> + Send + 'a>>
-    {
+    ) -> Pin<
+        Box<dyn Future<Output = Result<Option<ScopeSummaryProposal>, ExternalError>> + Send + 'a>,
+    > {
         Box::pin(async {
             Ok(Some(ScopeSummaryProposal {
                 content: "bad".into(),
                 references: vec![ContextId(999)],
+                covered: vec![ContextId(999)],
+                data: (),
             }))
         })
     }
@@ -231,11 +253,13 @@ struct BadSourceObjectizer;
 impl Objectizer for BadSourceObjectizer {
     fn extract<'a>(
         &'a self,
-        _inputs: &'a [RawInput],
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<StructuredProposal>, String>> + Send + 'a>> {
+        _input: ObjectizationInput<'a>,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<StructuredProposal>, ExternalError>> + Send + 'a>>
+    {
         Box::pin(async {
             Ok(vec![StructuredProposal {
                 content: "invented".into(),
+                data: (),
                 sources: vec![SourceSpan {
                     raw: ContextId(999),
                     revision: 1,
@@ -276,7 +300,12 @@ async fn corrupt_exact_reload_keeps_cold_payload_resident() {
             .maintenance_errors()
             .await
             .iter()
-            .any(|error| matches!(error, RuntimeError::ColdBacking(_)))
+            .any(|error| matches!(
+                error,
+                RuntimeError::ColdCompaction(context_collector::cold::ColdCompactorError::Backing(
+                    _
+                ))
+            ))
     );
 }
 
@@ -305,7 +334,12 @@ async fn summary_reference_outside_cold_cohort_is_rejected() {
             .maintenance_errors()
             .await
             .iter()
-            .any(|error| matches!(error, RuntimeError::InvalidScopeSummary(_)))
+            .any(|error| matches!(
+                error,
+                RuntimeError::ColdCompaction(
+                    context_collector::cold::ColdCompactorError::InvalidSummary(_)
+                )
+            ))
     );
 }
 
@@ -343,7 +377,12 @@ async fn ungrounded_structured_proposal_is_rejected() {
             .maintenance_errors()
             .await
             .iter()
-            .any(|error| matches!(error, RuntimeError::InvalidObjectization(_)))
+            .any(|error| matches!(
+                error,
+                RuntimeError::Objectization(
+                    context_collector::compaction::ObjectizationError::Invalid(_)
+                )
+            ))
     );
 }
 
@@ -353,14 +392,14 @@ struct LaterCorruptBacking {
     corrupt: std::sync::atomic::AtomicBool,
 }
 impl ColdBacking for LaterCorruptBacking {
-    fn store(&self, object: &ContextObject) -> Result<(), String> {
+    fn store(&self, object: &ContextObject) -> Result<(), ExternalError> {
         self.stored
             .lock()
             .unwrap()
             .insert(object.id, object.clone());
         Ok(())
     }
-    fn load(&self, id: ContextId) -> Result<Option<ContextObject>, String> {
+    fn load(&self, id: ContextId) -> Result<Option<ContextObject>, ExternalError> {
         Ok(self
             .stored
             .lock()
@@ -409,8 +448,88 @@ async fn later_backing_revision_mismatch_is_not_returned_as_canonical() {
         runtime
             .context_view(context_collector::TokenSpace(500), &[id])
             .await,
-        Err(RuntimeError::Invariant(
-            "backing returned wrong identity or revision"
+        Err(RuntimeError::View(
+            context_collector::view::ViewError::Invariant(
+                "backing returned wrong identity or revision"
+            )
         ))
     ));
+}
+
+struct PausedObjectizer {
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+}
+
+impl Objectizer for PausedObjectizer {
+    fn extract<'a>(
+        &'a self,
+        input: ObjectizationInput<'a>,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<StructuredProposal>, ExternalError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let raw = &input.raw[0];
+            self.entered.notify_one();
+            self.release.notified().await;
+            Ok(vec![StructuredProposal {
+                content: "late fact".into(),
+                sources: vec![SourceSpan {
+                    raw: raw.id,
+                    revision: raw.revision,
+                    start: 0,
+                    end: 1,
+                }],
+                data: (),
+            }])
+        })
+    }
+}
+
+#[tokio::test]
+async fn protected_raw_is_rejected_when_objectizer_returns_later() {
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let runtime = Runtime::with_counter(
+        config(),
+        Arc::new(Bytes),
+        Arc::new(PausedObjectizer {
+            entered: entered.clone(),
+            release: release.clone(),
+        }),
+        Arc::new(NoSummary),
+        Arc::new(context_collector::InMemoryColdBacking::default()),
+    )
+    .unwrap();
+    let first = runtime
+        .complete_turn("source".into(), "agent".into(), TurnObservation::default())
+        .await
+        .unwrap();
+    runtime.drain_maintenance().await;
+    runtime
+        .complete_turn("next".into(), "reply".into(), TurnObservation::default())
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), entered.notified())
+        .await
+        .unwrap();
+    runtime.protect(first.user, true).await.unwrap();
+    release.notify_one();
+    runtime.drain_maintenance().await;
+    assert!(runtime.maintenance_errors().await.iter().any(|error| matches!(
+        error,
+        RuntimeError::Objectization(
+            context_collector::compaction::ObjectizationError::Invalid(
+                context_collector::compaction::objectization::ObjectizationValidationError::SourceProtected
+            )
+        )
+    )));
+    assert_eq!(
+        runtime
+            .read(first.user)
+            .await
+            .unwrap()
+            .unwrap()
+            .representation,
+        Representation::Raw("source".into())
+    );
 }

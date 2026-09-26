@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex;
 
+use crate::collection::CollectionError;
 use crate::collection::{CollectionManager, Job};
 use crate::context::ContextId;
 use crate::heap::ZoneKind;
@@ -10,21 +11,25 @@ use super::{MaintenanceResult, RuntimeError, RuntimeState};
 use crate::cold::ColdCompactor;
 use crate::compaction::{ObjectizationCommit, ObjectizationManager};
 
-pub(super) struct MaintenanceRunner {
-    state: Arc<Mutex<RuntimeState>>,
+pub(super) struct MaintenanceRunner<Data, SummaryData> {
+    state: Arc<Mutex<RuntimeState<Data, SummaryData>>>,
     collection: CollectionManager,
-    objectization: ObjectizationManager,
-    cold_compactor: ColdCompactor,
+    objectization: ObjectizationManager<Data>,
+    cold_compactor: ColdCompactor<Data, SummaryData>,
     gate: Mutex<()>,
     errors: Mutex<Vec<RuntimeError>>,
 }
 
-impl MaintenanceRunner {
+impl<Data, SummaryData> MaintenanceRunner<Data, SummaryData>
+where
+    Data: Clone + PartialEq + Send + Sync + 'static,
+    SummaryData: Clone + Send + Sync + 'static,
+{
     pub fn new(
-        state: Arc<Mutex<RuntimeState>>,
+        state: Arc<Mutex<RuntimeState<Data, SummaryData>>>,
         collection: CollectionManager,
-        objectization: ObjectizationManager,
-        cold_compactor: ColdCompactor,
+        objectization: ObjectizationManager<Data>,
+        cold_compactor: ColdCompactor<Data, SummaryData>,
     ) -> Self {
         Self {
             state,
@@ -142,7 +147,7 @@ impl MaintenanceRunner {
     ) -> Result<Vec<ContextId>, RuntimeError> {
         let batch = {
             let state = self.state.lock().await;
-            ColdCompactor::prepare(&state.heap, scope)
+            ColdCompactor::<Data, SummaryData>::prepare(&state.heap, scope)
         };
         if batch.records().is_empty() {
             return Ok(Vec::new());
@@ -150,7 +155,7 @@ impl MaintenanceRunner {
         let (verified, proposal) = self.cold_compactor.offload(batch).await?;
         let mut state = self.state.lock().await;
         let RuntimeState { heap, catalog, .. } = &mut *state;
-        let moved = ColdCompactor::commit(heap, catalog, verified, proposal)?;
+        let moved = ColdCompactor::<Data, SummaryData>::commit(heap, catalog, verified, proposal)?;
         if !moved.is_empty() {
             state.schedule();
         }
@@ -159,10 +164,12 @@ impl MaintenanceRunner {
 
     async fn run_collection(
         &self,
-        operation: impl FnOnce(&mut RuntimeState) -> Result<Vec<ContextId>, &'static str>,
+        operation: impl FnOnce(
+            &mut RuntimeState<Data, SummaryData>,
+        ) -> Result<Vec<ContextId>, CollectionError>,
     ) -> Result<Vec<ContextId>, RuntimeError> {
         let mut state = self.state.lock().await;
-        let affected = operation(&mut state).map_err(RuntimeError::Invariant)?;
+        let affected = operation(&mut state)?;
         if !affected.is_empty() {
             state.schedule();
         }

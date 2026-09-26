@@ -15,9 +15,9 @@ impl TurnRecorder {
         Self { counter }
     }
 
-    pub fn record(
+    pub fn record<Data, SummaryData>(
         &self,
-        state: &mut RuntimeState,
+        state: &mut RuntimeState<Data, SummaryData>,
         user: String,
         agent: String,
         report: TurnObservation,
@@ -55,9 +55,9 @@ impl TurnRecorder {
         })
     }
 
-    fn insert_raw(
+    fn insert_raw<Data, SummaryData>(
         &self,
-        state: &mut RuntimeState,
+        state: &mut RuntimeState<Data, SummaryData>,
         scope: ScopeId,
         content: String,
     ) -> Result<ContextId, RuntimeError> {

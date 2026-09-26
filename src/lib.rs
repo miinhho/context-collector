@@ -2,15 +2,17 @@ pub mod cold;
 pub mod collection;
 pub mod compaction;
 pub mod context;
+pub mod error;
 pub mod heap;
-pub mod llm;
 pub mod runtime;
 pub mod scope;
 pub mod token;
 pub mod view;
 
 pub use cold::{ColdBacking, ColdCompactionBatch, InMemoryColdBacking};
-pub use compaction::objectization::{NoopObjectizer, Objectizer, RawInput, StructuredProposal};
+pub use compaction::objectization::{
+    NoopObjectizer, ObjectizationInput, Objectizer, RawInput, StructuredProposal,
+};
 pub use compaction::scope_summary::{
     NoopScopeSummarizer, ScopeSummarizer, ScopeSummaryInput, ScopeSummaryProposal,
 };

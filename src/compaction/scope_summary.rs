@@ -1,36 +1,38 @@
 use crate::context::{ContextId, ContextObject, ScopeId};
-use std::future::Future;
-use std::pin::Pin;
+use crate::error::TaskFuture;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ScopeSummaryInput {
-    pub object: ContextObject,
+pub struct ScopeSummaryInput<Data = ()> {
+    pub object: ContextObject<Data>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ScopeSummaryProposal {
+pub struct ScopeSummaryProposal<SummaryData = ()> {
     pub content: String,
     pub references: Vec<ContextId>,
+    pub covered: Vec<ContextId>,
+    pub data: SummaryData,
 }
 
-pub trait ScopeSummarizer: Send + Sync {
+pub trait ScopeSummarizer<Data = (), SummaryData = ()>: Send + Sync {
     fn summarize<'a>(
         &'a self,
         scope: ScopeId,
-        inputs: &'a [ScopeSummaryInput],
-    ) -> Pin<Box<dyn Future<Output = Result<Option<ScopeSummaryProposal>, String>> + Send + 'a>>;
+        inputs: &'a [ScopeSummaryInput<Data>],
+    ) -> TaskFuture<'a, Option<ScopeSummaryProposal<SummaryData>>>;
 }
 
 #[derive(Default)]
 pub struct NoopScopeSummarizer;
 
-impl ScopeSummarizer for NoopScopeSummarizer {
+impl<Data: Send + Sync, SummaryData: Send + Sync> ScopeSummarizer<Data, SummaryData>
+    for NoopScopeSummarizer
+{
     fn summarize<'a>(
         &'a self,
         _scope: ScopeId,
-        _inputs: &'a [ScopeSummaryInput],
-    ) -> Pin<Box<dyn Future<Output = Result<Option<ScopeSummaryProposal>, String>> + Send + 'a>>
-    {
+        _inputs: &'a [ScopeSummaryInput<Data>],
+    ) -> TaskFuture<'a, Option<ScopeSummaryProposal<SummaryData>>> {
         Box::pin(async { Ok(None) })
     }
 }

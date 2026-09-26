@@ -1,5 +1,7 @@
+use crate::error::ExternalError;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+use thiserror::Error;
 
 use crate::cold::{CatalogLocation, ColdBacking};
 use crate::context::{ContextId, ContextObject, ScopeId};
@@ -11,47 +13,54 @@ use crate::cold::ColdCatalog;
 use crate::heap::ContextHeap;
 use crate::scope::Scopes;
 
-#[derive(Debug)]
-pub(crate) enum ViewError {
+#[derive(Clone, Debug, Error)]
+pub enum ViewError {
+    #[error("unknown context {0:?}")]
     UnknownContext(ContextId),
+    #[error("view invariant failed: {0}")]
     Invariant(&'static str),
-    ColdBacking(String),
-    Worker(String),
+    #[error("Cold backing failed")]
+    ColdBacking(#[source] ExternalError),
+    #[error("view worker failed")]
+    Worker(#[source] ExternalError),
 }
 
-struct PlannedItem {
+struct PlannedItem<Data> {
     id: ContextId,
     revision: u64,
     scope: ScopeId,
     zone: Option<ZoneKind>,
-    resident: Option<ContextObject>,
+    resident: Option<ContextObject<Data>>,
 }
 
-pub(crate) struct ViewPlan {
-    items: Vec<PlannedItem>,
+pub(crate) struct ViewPlan<Data> {
+    items: Vec<PlannedItem<Data>>,
     cold_scopes: Vec<ColdScopeView>,
     used_tokens: usize,
 }
 
-pub(crate) struct ViewBuilder {
+pub(crate) struct ViewBuilder<Data> {
     counter: Arc<dyn TokenCounter>,
-    backing: Arc<dyn ColdBacking>,
+    backing: Arc<dyn ColdBacking<Data>>,
 }
 
-impl ViewBuilder {
-    pub fn new(counter: Arc<dyn TokenCounter>, backing: Arc<dyn ColdBacking>) -> Self {
+impl<Data> ViewBuilder<Data>
+where
+    Data: Clone + Send + Sync + 'static,
+{
+    pub fn new(counter: Arc<dyn TokenCounter>, backing: Arc<dyn ColdBacking<Data>>) -> Self {
         Self { counter, backing }
     }
 
-    pub fn prepare(
+    pub fn prepare<SummaryData>(
         &self,
-        heap: &ContextHeap,
+        heap: &ContextHeap<Data>,
         scopes: &Scopes,
-        catalog: &ColdCatalog,
+        catalog: &ColdCatalog<SummaryData>,
         turn: u64,
         budget: TokenSpace,
         explicit_cold: &[ContextId],
-    ) -> Result<ViewPlan, ViewError> {
+    ) -> Result<ViewPlan<Data>, ViewError> {
         let mut items = Vec::new();
         let mut used_tokens: usize = 0;
         let mut seen = BTreeSet::new();
@@ -174,7 +183,7 @@ impl ViewBuilder {
         })
     }
 
-    pub async fn build(&self, plan: ViewPlan) -> Result<ContextView, ViewError> {
+    pub async fn build(&self, plan: ViewPlan<Data>) -> Result<ContextView, ViewError> {
         let backing = Arc::clone(&self.backing);
         tokio::task::spawn_blocking(move || {
             let mut items = Vec::with_capacity(plan.items.len());
@@ -194,7 +203,7 @@ impl ViewBuilder {
                 items.push(ContextViewItem {
                     scope: item.scope,
                     zone: item.zone,
-                    object,
+                    object: object.without_user_data(),
                 });
             }
             Ok(ContextView {
@@ -204,6 +213,6 @@ impl ViewBuilder {
             })
         })
         .await
-        .map_err(|error| ViewError::Worker(error.to_string()))?
+        .map_err(|error| ViewError::Worker(Arc::new(error)))?
     }
 }

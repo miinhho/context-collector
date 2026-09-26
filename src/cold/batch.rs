@@ -1,45 +1,51 @@
 use crate::context::{ContextObject, ScopeId};
+use crate::error::ExternalError;
 
 use super::backing::ColdBacking;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BackingRecord {
-    pub object: ContextObject,
+pub struct BackingRecord<Data = ()> {
+    pub object: ContextObject<Data>,
     pub scope: ScopeId,
     pub tokens: usize,
 }
 
 #[derive(Clone, Debug)]
-pub struct ColdCompactionBatch {
+pub struct ColdCompactionBatch<Data = ()> {
     pub(crate) scope: ScopeId,
-    pub(crate) records: Vec<BackingRecord>,
+    pub(crate) records: Vec<BackingRecord<Data>>,
 }
 
-impl ColdCompactionBatch {
+impl<Data: Clone + PartialEq> ColdCompactionBatch<Data> {
     pub fn scope(&self) -> ScopeId {
         self.scope
     }
 
-    pub fn records(&self) -> &[BackingRecord] {
+    pub fn records(&self) -> &[BackingRecord<Data>] {
         &self.records
     }
 
-    pub fn verify(self, backing: &dyn ColdBacking) -> Result<VerifiedColdCompactionBatch, String> {
+    pub fn verify(
+        self,
+        backing: &dyn ColdBacking<Data>,
+    ) -> Result<VerifiedColdCompactionBatch<Data>, ExternalError> {
         for record in &self.records {
             if backing.load(record.object.id)? != Some(record.object.clone()) {
-                return Err("stored payload failed exact reload check".into());
+                return Err(std::sync::Arc::new(std::io::Error::other(
+                    "stored payload failed exact reload check",
+                )));
             }
         }
         Ok(VerifiedColdCompactionBatch { batch: self })
     }
 }
 
-pub struct VerifiedColdCompactionBatch {
-    batch: ColdCompactionBatch,
+pub struct VerifiedColdCompactionBatch<Data = ()> {
+    batch: ColdCompactionBatch<Data>,
 }
 
-impl VerifiedColdCompactionBatch {
-    pub(crate) fn into_batch(self) -> ColdCompactionBatch {
+impl<Data> VerifiedColdCompactionBatch<Data> {
+    pub(crate) fn into_batch(self) -> ColdCompactionBatch<Data> {
         self.batch
     }
 }

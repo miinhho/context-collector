@@ -1,9 +1,12 @@
+use context_collector::error::ExternalError;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
 use context_collector::cold::{CatalogLocation, ColdBacking};
-use context_collector::compaction::objectization::{Objectizer, RawInput, StructuredProposal};
+use context_collector::compaction::objectization::{
+    ObjectizationInput, Objectizer, StructuredProposal,
+};
 use context_collector::compaction::scope_summary::{
     ScopeSummarizer, ScopeSummaryInput, ScopeSummaryProposal,
 };
@@ -24,14 +27,16 @@ struct FirstSpan;
 impl Objectizer for FirstSpan {
     fn extract<'a>(
         &'a self,
-        inputs: &'a [RawInput],
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<StructuredProposal>, String>> + Send + 'a>> {
+        input: ObjectizationInput<'a>,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<StructuredProposal>, ExternalError>> + Send + 'a>>
+    {
         Box::pin(async move {
-            let Some(first) = inputs.iter().find(|input| !input.content.is_empty()) else {
+            let Some(first) = input.raw.iter().find(|input| !input.content.is_empty()) else {
                 return Ok(Vec::new());
             };
             Ok(vec![StructuredProposal {
                 content: "fact".into(),
+                data: (),
                 sources: vec![SourceSpan {
                     raw: first.id,
                     revision: first.revision,
@@ -49,12 +54,15 @@ impl ScopeSummarizer for FixedSummary {
         &'a self,
         _scope: ScopeId,
         inputs: &'a [ScopeSummaryInput],
-    ) -> Pin<Box<dyn Future<Output = Result<Option<ScopeSummaryProposal>, String>> + Send + 'a>>
-    {
+    ) -> Pin<
+        Box<dyn Future<Output = Result<Option<ScopeSummaryProposal>, ExternalError>> + Send + 'a>,
+    > {
         Box::pin(async move {
             Ok(Some(ScopeSummaryProposal {
                 content: "opaque scope summary".into(),
                 references: inputs.iter().map(|item| item.object.id).collect(),
+                covered: inputs.iter().map(|item| item.object.id).collect(),
+                data: (),
             }))
         })
     }
@@ -374,4 +382,89 @@ async fn synthetic_scope_report_sequences_preserve_turn_assignment_and_raw() {
             }
         }
     }
+}
+
+struct FirstOnlySummary {
+    input_sizes: std::sync::Mutex<Vec<usize>>,
+}
+
+impl ScopeSummarizer for FirstOnlySummary {
+    fn summarize<'a>(
+        &'a self,
+        _scope: ScopeId,
+        inputs: &'a [ScopeSummaryInput],
+    ) -> Pin<
+        Box<dyn Future<Output = Result<Option<ScopeSummaryProposal>, ExternalError>> + Send + 'a>,
+    > {
+        Box::pin(async move {
+            self.input_sizes.lock().unwrap().push(inputs.len());
+            let id = inputs[0].object.id;
+            Ok(Some(ScopeSummaryProposal {
+                content: "first object only".into(),
+                references: vec![id],
+                covered: vec![id],
+                data: (),
+            }))
+        })
+    }
+}
+
+#[tokio::test]
+async fn cold_summary_coverage_tracks_declared_subset_of_selected_objects() {
+    let summarizer = Arc::new(FirstOnlySummary {
+        input_sizes: std::sync::Mutex::new(Vec::new()),
+    });
+    let runtime = runtime(
+        Arc::new(NoopObjectizer),
+        summarizer.clone(),
+        Arc::new(InMemoryColdBacking::default()),
+    );
+    let first = runtime
+        .complete_turn(
+            "source payload".into(),
+            "agent".into(),
+            TurnObservation::default(),
+        )
+        .await
+        .unwrap();
+    settle(&runtime).await;
+    runtime
+        .complete_turn("next".into(), "reply".into(), TurnObservation::default())
+        .await
+        .unwrap();
+    settle(&runtime).await;
+    runtime
+        .complete_turn(
+            "other".into(),
+            "topic".into(),
+            TurnObservation {
+                uses: None,
+                scope: Some(ScopeReport::Transition),
+            },
+        )
+        .await
+        .unwrap();
+    settle(&runtime).await;
+    runtime
+        .complete_turn(
+            "continued".into(),
+            "topic".into(),
+            TurnObservation::default(),
+        )
+        .await
+        .unwrap();
+    settle(&runtime).await;
+    assert!(
+        summarizer
+            .input_sizes
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|size| *size > 1)
+    );
+    let summaries = runtime.cold_scope_summaries(first.scope).await;
+    assert!(!summaries.is_empty());
+    assert!(summaries.iter().all(
+        |summary| summary.coverage.len() == 1 && summary.coverage[0].0 == summary.references[0]
+    ));
 }

@@ -3,11 +3,12 @@ use self::turn::TurnRecorder;
 use crate::cold::{
     CatalogLocation, ColdBacking, ColdCatalogEntry, ColdCompactor, ColdCompactorError,
 };
-use crate::collection::CollectionManager;
+use crate::collection::{CollectionError, CollectionManager};
 use crate::compaction::objectization::Objectizer;
 use crate::compaction::scope_summary::ScopeSummarizer;
 use crate::compaction::{ObjectizationError, ObjectizationManager};
 use crate::context::ContextObject;
+use crate::error::ExternalError;
 use crate::heap::{TokenUsage, ZoneKind};
 use crate::token::{TiktokenCounter, TokenCounter};
 use crate::view::{ContextView, TokenSpace, ViewBuilder, ViewError};
@@ -51,63 +52,28 @@ impl RuntimeConfig {
     }
 }
 
-#[derive(Clone, Debug, Eq, Error, PartialEq)]
+#[derive(Clone, Debug, Error)]
 pub enum RuntimeError {
     #[error("invalid runtime configuration")]
     InvalidConfig,
-    #[error("invalid runtime configuration: {0}")]
-    InvalidConfigDetail(String),
     #[error("unknown context {0:?}")]
     UnknownContext(ContextId),
     #[error("unknown scope {0:?}")]
     UnknownScope(ScopeId),
-    #[error("invalid objectization: {0}")]
-    InvalidObjectization(String),
-    #[error("objectizer failed: {0}")]
-    Objectizer(String),
-    #[error("scope summary failed: {0}")]
-    ScopeSummary(String),
-    #[error("invalid scope summary: {0}")]
-    InvalidScopeSummary(String),
-    #[error("Cold backing failed: {0}")]
-    ColdBacking(String),
-    #[error("maintenance worker failed: {0}")]
-    Worker(String),
+    #[error(transparent)]
+    Objectization(#[from] ObjectizationError),
+    #[error(transparent)]
+    ColdCompaction(#[from] ColdCompactorError),
+    #[error(transparent)]
+    View(#[from] ViewError),
+    #[error(transparent)]
+    Collection(#[from] CollectionError),
+    #[error("Cold backing failed")]
+    ColdBacking(#[source] ExternalError),
+    #[error("maintenance worker failed")]
+    Worker(#[source] ExternalError),
     #[error("runtime invariant failed: {0}")]
     Invariant(&'static str),
-}
-
-impl From<ObjectizationError> for RuntimeError {
-    fn from(error: ObjectizationError) -> Self {
-        match error {
-            ObjectizationError::Objectizer(message) => Self::Objectizer(message),
-            ObjectizationError::Invalid(message) => Self::InvalidObjectization(message),
-            ObjectizationError::Invariant(message) => Self::Invariant(message),
-        }
-    }
-}
-
-impl From<ColdCompactorError> for RuntimeError {
-    fn from(error: ColdCompactorError) -> Self {
-        match error {
-            ColdCompactorError::Summary(message) => Self::ScopeSummary(message),
-            ColdCompactorError::InvalidSummary(message) => Self::InvalidScopeSummary(message),
-            ColdCompactorError::Backing(message) => Self::ColdBacking(message),
-            ColdCompactorError::Worker(message) => Self::Worker(message),
-            ColdCompactorError::Invariant(message) => Self::Invariant(message),
-        }
-    }
-}
-
-impl From<ViewError> for RuntimeError {
-    fn from(error: ViewError) -> Self {
-        match error {
-            ViewError::UnknownContext(id) => Self::UnknownContext(id),
-            ViewError::Invariant(message) => Self::Invariant(message),
-            ViewError::ColdBacking(message) => Self::ColdBacking(message),
-            ViewError::Worker(message) => Self::Worker(message),
-        }
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -125,17 +91,17 @@ pub struct MaintenanceResult {
 }
 
 // Canonical mutable state. Work policy and external services live in composed workers.
-struct RuntimeState {
+struct RuntimeState<Data, SummaryData> {
     config: RuntimeConfig,
-    heap: ContextHeap,
+    heap: ContextHeap<Data>,
     scopes: Scopes,
-    catalog: ColdCatalog,
+    catalog: ColdCatalog<SummaryData>,
     scheduler: CollectionScheduler,
     turn: u64,
     next_id: u64,
 }
 
-impl RuntimeState {
+impl<Data, SummaryData> RuntimeState<Data, SummaryData> {
     fn new(config: RuntimeConfig) -> Result<Self, RuntimeError> {
         if !config.valid() {
             return Err(RuntimeError::InvalidConfig);
@@ -164,20 +130,24 @@ impl RuntimeState {
 }
 
 #[derive(Clone)]
-pub struct Runtime {
-    state: Arc<Mutex<RuntimeState>>,
+pub struct Runtime<Data = (), SummaryData = ()> {
+    state: Arc<Mutex<RuntimeState<Data, SummaryData>>>,
     recorder: Arc<TurnRecorder>,
-    view: Arc<ViewBuilder>,
-    maintenance: Arc<MaintenanceRunner>,
-    backing: Arc<dyn ColdBacking>,
+    view: Arc<ViewBuilder<Data>>,
+    maintenance: Arc<MaintenanceRunner<Data, SummaryData>>,
+    backing: Arc<dyn ColdBacking<Data>>,
 }
 
-impl Runtime {
+impl<Data, SummaryData> Runtime<Data, SummaryData>
+where
+    Data: Clone + PartialEq + Send + Sync + 'static,
+    SummaryData: Clone + Send + Sync + 'static,
+{
     pub fn new(
         config: RuntimeConfig,
-        objectizer: Arc<dyn Objectizer>,
-        summarizer: Arc<dyn ScopeSummarizer>,
-        backing: Arc<dyn ColdBacking>,
+        objectizer: Arc<dyn Objectizer<Data>>,
+        summarizer: Arc<dyn ScopeSummarizer<Data, SummaryData>>,
+        backing: Arc<dyn ColdBacking<Data>>,
     ) -> Result<Self, RuntimeError> {
         Self::with_counter(
             config,
@@ -191,9 +161,9 @@ impl Runtime {
     pub fn with_counter(
         config: RuntimeConfig,
         counter: Arc<dyn TokenCounter>,
-        objectizer: Arc<dyn Objectizer>,
-        summarizer: Arc<dyn ScopeSummarizer>,
-        backing: Arc<dyn ColdBacking>,
+        objectizer: Arc<dyn Objectizer<Data>>,
+        summarizer: Arc<dyn ScopeSummarizer<Data, SummaryData>>,
+        backing: Arc<dyn ColdBacking<Data>>,
     ) -> Result<Self, RuntimeError> {
         let state = Arc::new(Mutex::new(RuntimeState::new(config)?));
         let recorder = Arc::new(TurnRecorder::new(Arc::clone(&counter)));
@@ -228,7 +198,7 @@ impl Runtime {
         Ok(receipt)
     }
 
-    pub async fn read(&self, id: ContextId) -> Result<Option<ContextObject>, RuntimeError> {
+    pub async fn read(&self, id: ContextId) -> Result<Option<ContextObject<Data>>, RuntimeError> {
         let expected_revision = {
             let state = self.state.lock().await;
             if let Some((_, entry)) = state.heap.find(id) {
@@ -258,7 +228,7 @@ impl Runtime {
             Ok(Some(object))
         })
         .await
-        .map_err(|error| RuntimeError::Worker(error.to_string()))?
+        .map_err(|error| RuntimeError::Worker(Arc::new(error)))?
     }
 
     pub async fn context_view(
@@ -307,6 +277,13 @@ impl Runtime {
             .cloned()
             .collect()
     }
+    pub async fn cold_scope_summaries(
+        &self,
+        scope: ScopeId,
+    ) -> Vec<crate::cold::ScopeSummary<SummaryData>> {
+        self.state.lock().await.catalog.summaries(scope).to_vec()
+    }
+
     pub async fn protect(&self, id: ContextId, protected: bool) -> Result<(), RuntimeError> {
         let mut state = self.state.lock().await;
         let zone = state

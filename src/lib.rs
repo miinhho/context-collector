@@ -24,4 +24,4 @@ pub use heap::{TokenUsage, Watermark, ZoneKind};
 pub use runtime::Runtime;
 pub use runtime::{RuntimeConfig, RuntimeError, ScopeReport, TurnObservation};
 pub use token::{TiktokenCounter, TokenCounter};
-pub use view::ContextView;
+pub use view::{ContextView, ViewSectionUsage, ViewUsage};

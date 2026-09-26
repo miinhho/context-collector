@@ -140,6 +140,17 @@ async fn view_keeps_turn_messages_in_role_order_and_renders_markdown() {
     assert!(!markdown.contains("Scope"));
     assert!(!markdown.contains("Cold"));
     assert!(!markdown.contains("RawInfo"));
+    assert_eq!(view.usage.total, markdown.len());
+    assert_eq!(runtime.view_usage().await.unwrap(), view.usage);
+    let eden = view
+        .usage
+        .section(context_collector::ZoneKind::Eden)
+        .unwrap();
+    assert!(eden.rendered_tokens > 0);
+    assert_eq!(
+        eden.stored_tokens,
+        runtime.zone_usage(context_collector::ZoneKind::Eden).await
+    );
 }
 
 #[tokio::test]
@@ -257,6 +268,8 @@ async fn explicit_backed_content_is_loaded_into_the_view() {
             note.id == Some(first.user) && note.content == "아주 긴 원본 기록"
         })
     );
+    assert!(view.usage.recalled > 0);
+    assert_eq!(view.usage.total, view.markdown().len());
     assert!(
         view.messages
             .iter()

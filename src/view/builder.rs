@@ -4,11 +4,13 @@ use std::sync::Arc;
 use thiserror::Error;
 
 use crate::cold::{CatalogLocation, ColdBacking, ColdCatalog};
-use crate::context::{ContextId, ContextItem, InfoKind, MessageRole, ProcessingState, ScopeId};
+use crate::context::{ContextId, ContextItem, ProcessingState, ScopeId};
 use crate::error::ExternalError;
 use crate::heap::{ContextHeap, ZoneKind};
 use crate::scope::Scopes;
-use crate::view::{ContextView, ViewMessage, ViewNote, note_for_item};
+use crate::token::TokenCounter;
+use crate::view::space::ViewSpace;
+use crate::view::{ContextView, ViewUsage, note_for_item};
 
 #[derive(Clone, Debug, Error)]
 pub enum ViewError {
@@ -30,27 +32,39 @@ struct StoredCandidate<Data> {
     resident: Option<ContextItem<Data>>,
 }
 
-enum Candidate<Data> {
-    Note(ViewNote),
-    Explicit(StoredCandidate<Data>),
-}
-
 pub(crate) struct ViewPlan<Data> {
-    messages: Vec<ViewMessage>,
-    hot_notes: Vec<ViewNote>,
-    additions: Vec<Candidate<Data>>,
+    space: ViewSpace,
+    recalled: Vec<StoredCandidate<Data>>,
 }
 
 pub(crate) struct ViewBuilder<Data> {
     backing: Arc<dyn ColdBacking<Data>>,
+    counter: Arc<dyn TokenCounter>,
 }
 
 impl<Data> ViewBuilder<Data>
 where
     Data: Clone + Send + Sync + 'static,
 {
-    pub fn new(backing: Arc<dyn ColdBacking<Data>>) -> Self {
-        Self { backing }
+    pub fn new(backing: Arc<dyn ColdBacking<Data>>, counter: Arc<dyn TokenCounter>) -> Self {
+        Self { backing, counter }
+    }
+
+    pub fn project<SummaryData>(
+        heap: &ContextHeap<Data>,
+        scopes: &Scopes,
+        catalog: &ColdCatalog<SummaryData>,
+        turn: u64,
+    ) -> ViewSpace {
+        ViewSpace::project(heap, scopes, catalog, turn)
+    }
+
+    pub async fn usage(&self, space: ViewSpace) -> Result<ViewUsage, ViewError> {
+        let counter = Arc::clone(&self.counter);
+        // A token counter may do substantial CPU work; the state lock is released.
+        tokio::task::spawn_blocking(move || space.usage(counter.as_ref()))
+            .await
+            .map_err(|error| ViewError::Worker(Arc::new(error)))
     }
 
     pub fn prepare<SummaryData>(
@@ -61,46 +75,8 @@ where
         turn: u64,
         explicit_cold: &[ContextId],
     ) -> Result<ViewPlan<Data>, ViewError> {
-        let current = scopes.current();
-        let mut messages = Vec::new();
-        let mut infos = Vec::new();
-        for zone in [
-            ZoneKind::Eden,
-            ZoneKind::Survivor,
-            ZoneKind::Mature,
-            ZoneKind::Cooling,
-        ] {
-            for entry in heap.zone(zone).entries() {
-                if entry.scope != current && entry.last_used_turn != Some(turn) {
-                    continue;
-                }
-                match &entry.item.kind {
-                    InfoKind::Raw(raw) => {
-                        let Some(origin) = entry.item.message else {
-                            continue;
-                        };
-                        let message = ViewMessage {
-                            id: entry.id,
-                            scope: entry.scope,
-                            turn: origin.turn,
-                            role: origin.role,
-                            content: raw.content.clone(),
-                        };
-                        messages.push(message);
-                    }
-                    InfoKind::Info(_) => {
-                        infos.push((
-                            entry.last_used_turn == Some(turn),
-                            entry.id,
-                            note_for_item(entry.scope, &entry.item),
-                        ));
-                    }
-                }
-            }
-        }
-        messages.sort_by_key(|message| (message.turn, role_order(message.role), message.id));
-        infos.sort_by_key(|(used, id, _)| (std::cmp::Reverse(*used), std::cmp::Reverse(*id)));
-        let mut additions = Vec::new();
+        let space = Self::project(heap, scopes, catalog, turn);
+        let mut recalled = Vec::new();
         let mut seen = BTreeSet::new();
         for id in explicit_cold {
             if !seen.insert(*id) {
@@ -108,13 +84,13 @@ where
             }
             if let Some((zone, entry)) = heap.find(*id) {
                 if zone == ZoneKind::Cold {
-                    additions.push(Candidate::Explicit(StoredCandidate {
+                    recalled.push(StoredCandidate {
                         id: *id,
                         scope: entry.scope,
                         revision: entry.item.revision,
                         processing: entry.item.processing.clone(),
                         resident: Some(entry.item.clone()),
-                    }));
+                    });
                 }
             } else {
                 let entry = catalog.get(*id).ok_or(ViewError::UnknownContext(*id))?;
@@ -123,90 +99,56 @@ where
                         "ColdCatalog points to missing Cold entry",
                     ));
                 }
-                additions.push(Candidate::Explicit(StoredCandidate {
+                recalled.push(StoredCandidate {
                     id: *id,
                     scope: entry.scope,
                     revision: entry.revision,
                     processing: entry.processing.clone(),
                     resident: None,
-                }));
+                });
             }
         }
-        let hot_notes = infos.into_iter().map(|(_, _, note)| note).collect();
-
-        let mut relevant_scopes = BTreeSet::from([current]);
-        for entry in catalog.entries() {
-            if entry.last_used_turn == Some(turn) {
-                relevant_scopes.insert(entry.scope);
-            }
-        }
-        for scope in scopes.all() {
-            if scope.last_transition_out() == Some(turn) {
-                relevant_scopes.insert(scope.id);
-            }
-        }
-        let mut relevant_scopes = relevant_scopes.into_iter().collect::<Vec<_>>();
-        relevant_scopes.sort_by_key(|scope| (*scope != current, std::cmp::Reverse(*scope)));
-        for scope in relevant_scopes {
-            for summary in catalog.summaries(scope).iter().rev() {
-                additions.push(Candidate::Note(ViewNote {
-                    id: None,
-                    scope,
-                    message: None,
-                    content: summary.content.clone(),
-                    sources: Vec::new(),
-                    coverage: summary.coverage.iter().map(|(id, _)| *id).collect(),
-                }));
-            }
-        }
-        Ok(ViewPlan {
-            messages,
-            hot_notes,
-            additions,
-        })
+        Ok(ViewPlan { space, recalled })
     }
 
     pub async fn build(&self, plan: ViewPlan<Data>) -> Result<ContextView, ViewError> {
         let backing = Arc::clone(&self.backing);
+        let counter = Arc::clone(&self.counter);
         tokio::task::spawn_blocking(move || {
-            let mut view = ContextView {
-                notes: plan.hot_notes,
-                messages: plan.messages,
-            };
-            for candidate in plan.additions {
-                let note = match candidate {
-                    Candidate::Note(note) => note,
-                    Candidate::Explicit(stored) => {
-                        let item = match stored.resident {
-                            Some(item) => item,
-                            None => backing
-                                .load(stored.id)
-                                .map_err(ViewError::ColdBacking)?
-                                .ok_or(ViewError::Invariant("backing lost cataloged info"))?,
-                        };
-                        if item.id != stored.id
-                            || item.revision != stored.revision
-                            || item.processing != stored.processing
-                        {
-                            return Err(ViewError::Invariant(
-                                "backing returned wrong identity, revision, or processing state",
-                            ));
-                        }
-                        note_for_item(stored.scope, &item)
-                    }
+            let mut view = plan.space.view();
+            view.usage = plan.space.usage(counter.as_ref());
+            let mut recalled_notes = Vec::new();
+            for stored in plan.recalled {
+                let item = match stored.resident {
+                    Some(item) => item,
+                    None => backing
+                        .load(stored.id)
+                        .map_err(ViewError::ColdBacking)?
+                        .ok_or(ViewError::Invariant("backing lost cataloged info"))?,
                 };
+                if item.id != stored.id
+                    || item.revision != stored.revision
+                    || item.processing != stored.processing
+                {
+                    return Err(ViewError::Invariant(
+                        "backing returned wrong identity, revision, or processing state",
+                    ));
+                }
+                let note = note_for_item(stored.scope, &item);
+                recalled_notes.push(note.clone());
                 view.notes.push(note);
             }
+            view.usage.recalled = counter.count(
+                &ContextView {
+                    notes: recalled_notes,
+                    ..ContextView::default()
+                }
+                .notes_markdown(),
+            );
+            view.usage.total = counter.count(&view.markdown());
             Ok(view)
         })
         .await
         .map_err(|error| ViewError::Worker(Arc::new(error)))?
-    }
-}
-
-fn role_order(role: MessageRole) -> u8 {
-    match role {
-        MessageRole::User => 0,
-        MessageRole::Agent => 1,
     }
 }

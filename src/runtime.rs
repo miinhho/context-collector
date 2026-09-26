@@ -12,7 +12,7 @@ use crate::context::{ContextItem, InfoKind};
 use crate::error::ExternalError;
 use crate::heap::{TokenUsage, ZoneKind};
 use crate::token::{TiktokenCounter, TokenCounter};
-use crate::view::{ContextView, ViewBuilder, ViewError, lookup};
+use crate::view::{ContextView, ViewBuilder, ViewError, ViewUsage, lookup};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use thiserror::Error;
@@ -174,7 +174,7 @@ where
     ) -> Result<Self, RuntimeError> {
         let state = Arc::new(Mutex::new(RuntimeState::new(config)?));
         let recorder = Arc::new(TurnRecorder::new(Arc::clone(&counter)));
-        let view = Arc::new(ViewBuilder::new(Arc::clone(&backing)));
+        let view = Arc::new(ViewBuilder::new(Arc::clone(&backing), Arc::clone(&counter)));
         let maintenance = Arc::new(MaintenanceRunner::new(
             Arc::clone(&state),
             CollectionManager::new(config.hot_high),
@@ -261,6 +261,14 @@ where
             )?
         };
         Ok(self.view.build(plan).await?)
+    }
+
+    pub async fn view_usage(&self) -> Result<ViewUsage, RuntimeError> {
+        let space = {
+            let state = self.state.lock().await;
+            ViewBuilder::<Data>::project(&state.heap, &state.scopes, &state.catalog, state.turn)
+        };
+        Ok(self.view.usage(space).await?)
     }
 
     /// Recently reported uses across resident and backed information.

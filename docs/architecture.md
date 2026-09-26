@@ -129,6 +129,14 @@ Cold와 Backing에 있는 정보의 `uses`도 ColdCatalog에 관측으로 기록
 정보의 token 점유와 압력은 Heap의 Zone별 watermark와
 Collection·Compaction이 관리한다. View는 별도의 예산으로 Hot 내용을
 제외하거나 저장 상태를 바꾸지 않는다.
+각 Zone의 정보가 기본 View에서 차지하는 내용은 대응하는 View section에서
+계산한다. 선택된 Info가 RawInfo를 참조하면 기본 View에는 Info와 원문 참조를
+두고, 정확한 RawInfo 본문은 조회할 때 읽는다. Section의 token 점유는 실제
+Markdown 표현으로 계측하며 같은 시점의 Zone 점유와 watermark를 함께 볼 수
+있다. 여러 Zone의 대화는 최종 View에서 turn과 역할
+순서로 합친다. Section은 내부 전달 계측이며 Agent에게 Zone 이름으로 노출되지
+않는다. Backing에서 명시적으로 재호출한 내용의 전달량은 별도로 계측한다.
+Scheduler는 Heap의 watermark와 안전한 후보를 기준으로 동작한다.
 호출자는 최근 사용 정보, Scope의 요약과 정보 참조, 개별 정보 및 Info의 원문
 근거를 필요할 때 조회할 수 있다. 조회 결과도 저장 위치를 드러내지 않는
 Markdown으로 표현하며, 원본 내용과 사용자 정의 데이터의 정확한 조회 계약은

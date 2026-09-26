@@ -234,12 +234,17 @@ async fn settled_raw_is_not_refined_again_in_the_same_hot_lifecycle() {
         full_view
             .notes
             .iter()
-            .any(|note| note.content == "refined information")
+            .any(|note| note.content == "refined information"
+                && note.sources.contains(&first.user))
     );
     assert!(
-        full_view
+        !full_view
             .messages
             .iter()
             .any(|message| message.id == first.user)
+    );
+    assert_eq!(
+        runtime.read(first.user).await.unwrap().unwrap().kind,
+        context_collector::InfoKind::Raw("source".into())
     );
 }

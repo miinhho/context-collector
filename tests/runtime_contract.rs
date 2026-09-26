@@ -166,11 +166,47 @@ async fn info_refinement_keeps_raw_exact_and_tracks_both_token_kinds() {
         .collect();
     assert!(!extracted.is_empty());
     assert!(extracted.iter().all(|note| note.scope == first.scope));
+    assert!(!view.messages.iter().any(|message| message.id == first.user));
+    assert_eq!(view.usage.total, view.markdown().len());
     for note in extracted {
         let zone = runtime.zone_of(note.id.unwrap()).await.unwrap();
         let usage = runtime.zone_usage(zone).await;
         assert!(usage.raw > 0 && usage.info > 0);
+        assert!(view.usage.section(zone).unwrap().rendered_tokens > 0);
     }
+}
+
+#[tokio::test]
+async fn refined_info_replaces_raw_body_only_in_the_view_section() {
+    let runtime = runtime(
+        Arc::new(FirstSpan),
+        Arc::new(FixedSummary),
+        Arc::new(InMemoryColdBacking::default()),
+    );
+    let raw = "x".repeat(400);
+    let first = runtime
+        .complete_turn(raw.clone(), "a".into(), TurnObservation::default())
+        .await
+        .unwrap();
+    settle(&runtime).await;
+    runtime
+        .complete_turn("b".into(), "c".into(), TurnObservation::default())
+        .await
+        .unwrap();
+    settle(&runtime).await;
+
+    let view = runtime.context_view(&[]).await.unwrap();
+    assert!(
+        view.notes
+            .iter()
+            .any(|note| note.sources.contains(&first.user))
+    );
+    assert!(!view.messages.iter().any(|message| message.id == first.user));
+    assert!(view.usage.total < raw.len());
+    assert_eq!(
+        runtime.read(first.user).await.unwrap().unwrap().kind,
+        InfoKind::Raw(raw.into())
+    );
 }
 
 #[tokio::test]

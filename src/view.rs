@@ -4,8 +4,10 @@ use crate::context::{ContextId, ContextItem, InfoKind, MessageOrigin, MessageRol
 
 mod builder;
 pub(crate) mod lookup;
+mod space;
 pub(crate) use builder::ViewBuilder;
 pub use builder::ViewError;
+pub use space::{ViewSectionUsage, ViewUsage};
 
 /// A turn message retained with its original speaker and order.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -32,6 +34,8 @@ pub struct ViewNote {
 pub struct ContextView {
     pub notes: Vec<ViewNote>,
     pub messages: Vec<ViewMessage>,
+    /// Delivery measurement from the same renderer used for this View.
+    pub usage: ViewUsage,
 }
 
 impl ContextView {

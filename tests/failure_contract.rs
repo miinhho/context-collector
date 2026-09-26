@@ -441,9 +441,7 @@ async fn later_backing_revision_mismatch_is_not_returned_as_canonical() {
         ))
     ));
     assert!(matches!(
-        runtime
-            .context_view(context_collector::TokenSpace(500), &[id])
-            .await,
+        runtime.context_view(&[id]).await,
         Err(RuntimeError::View(
             context_collector::view::ViewError::Invariant(
                 "backing returned wrong identity, revision, or processing state"

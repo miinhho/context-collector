@@ -121,12 +121,14 @@ Cold 부분의 Scope 요약은 이전 대화를 이어주는 Markdown 내용으�
 Runtime의 RawInfo에서 다음 View를 구성한다.
 
 Scope 소속과 명시적 `uses`는 관련 내용을 선정하는 근거다. Hot·Cold와 Backing
-위치는 접근 경로와 예산 판단에 사용하며 Agent용 문구에 노출하지 않는다.
+위치는 접근 경로에 사용하며 Agent용 문구에 노출하지 않는다.
 Info의 근거 구간이나 Scope 요약의 반영 범위가 원본 전체의 의미적 대체를
 보증하지는 않는다. 원본이 View에 실리지 않아도 정확히 조회할 수 있어야 한다.
 Cold와 Backing에 있는 정보의 `uses`도 ColdCatalog에 관측으로 기록하지만
 보고했다는 이유만으로 Zone을 바꾸거나 본문을 다음 View에 강제로 포함하지 않는다.
-View의 token 사용량은 Agent에게 전달할 Markdown 표현을 기준으로 계측한다.
+정보의 token 점유와 압력은 Heap의 Zone별 watermark와
+Collection·Compaction이 관리한다. View는 별도의 예산으로 Hot 내용을
+제외하거나 저장 상태를 바꾸지 않는다.
 호출자는 최근 사용 정보, Scope의 요약과 정보 참조, 개별 정보 및 Info의 원문
 근거를 필요할 때 조회할 수 있다. 조회 결과도 저장 위치를 드러내지 않는
 Markdown으로 표현하며, 원본 내용과 사용자 정의 데이터의 정확한 조회 계약은

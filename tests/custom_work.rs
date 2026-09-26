@@ -138,7 +138,7 @@ async fn user_data_survives_refinement_cold_backing_and_catalog_retrieval() {
     runtime.drain_maintenance().await;
     assert!(!refiner.observed.lock().unwrap().is_empty());
     let info_id = runtime
-        .context_view(context_collector::TokenSpace(1000), &[])
+        .context_view(&[])
         .await
         .unwrap()
         .notes
@@ -431,7 +431,7 @@ async fn changing_user_metadata_does_not_duplicate_the_same_grounded_info() {
     runtime.drain_maintenance().await;
     assert!(refiner.calls.load(std::sync::atomic::Ordering::SeqCst) > 1);
     let same_fact_count = runtime
-        .context_view(context_collector::TokenSpace(1000), &[])
+        .context_view(&[])
         .await
         .unwrap()
         .notes

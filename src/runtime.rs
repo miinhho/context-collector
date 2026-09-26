@@ -12,9 +12,7 @@ use crate::context::{ContextItem, InfoKind};
 use crate::error::ExternalError;
 use crate::heap::{TokenUsage, ZoneKind};
 use crate::token::{TiktokenCounter, TokenCounter};
-use crate::view::{
-    ContextView, TokenSpace, ViewBuilder, ViewError, ViewNote, note_for_item, references,
-};
+use crate::view::{ContextView, ViewBuilder, ViewError, lookup};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use thiserror::Error;
@@ -145,7 +143,6 @@ pub struct Runtime<Data = (), SummaryData = ()> {
     view: Arc<ViewBuilder<Data>>,
     maintenance: Arc<MaintenanceRunner<Data, SummaryData>>,
     backing: Arc<dyn ColdBacking<Data>>,
-    counter: Arc<dyn TokenCounter>,
 }
 
 impl<Data, SummaryData> Runtime<Data, SummaryData>
@@ -177,7 +174,7 @@ where
     ) -> Result<Self, RuntimeError> {
         let state = Arc::new(Mutex::new(RuntimeState::new(config)?));
         let recorder = Arc::new(TurnRecorder::new(Arc::clone(&counter)));
-        let view = Arc::new(ViewBuilder::new(Arc::clone(&counter), Arc::clone(&backing)));
+        let view = Arc::new(ViewBuilder::new(Arc::clone(&backing)));
         let maintenance = Arc::new(MaintenanceRunner::new(
             Arc::clone(&state),
             CollectionManager::new(config.hot_high),
@@ -195,7 +192,6 @@ where
             view,
             maintenance,
             backing,
-            counter,
         })
     }
 
@@ -252,7 +248,6 @@ where
 
     pub async fn context_view(
         &self,
-        budget: TokenSpace,
         explicit_cold: &[ContextId],
     ) -> Result<ContextView, RuntimeError> {
         let plan = {
@@ -262,7 +257,6 @@ where
                 &state.scopes,
                 &state.catalog,
                 state.turn,
-                budget,
                 explicit_cold,
             )?
         };
@@ -275,111 +269,30 @@ where
         &self,
         scope: Option<ScopeId>,
         limit: usize,
-        budget: TokenSpace,
     ) -> Result<String, RuntimeError> {
-        let mut recent = {
+        let recent = {
             let state = self.state.lock().await;
-            let mut found = std::collections::BTreeMap::new();
-            for zone in ZoneKind::ALL {
-                for entry in state.heap.zone(zone).entries() {
-                    if let Some(turn) = entry.last_used_turn
-                        && scope.is_none_or(|scope| scope == entry.scope())
-                    {
-                        found.insert(entry.item.id, (entry.scope(), turn));
-                    }
-                }
-            }
-            for entry in state.catalog.entries() {
-                if let Some(turn) = entry.last_used_turn
-                    && scope.is_none_or(|scope| scope == entry.scope)
-                {
-                    found.insert(entry.id, (entry.scope, turn));
-                }
-            }
-            found.into_iter().collect::<Vec<_>>()
+            lookup::recent_ids(&state.heap, &state.catalog, scope, limit)
         };
-        recent.sort_by_key(|(id, (_, turn))| (std::cmp::Reverse(*turn), std::cmp::Reverse(*id)));
-        let mut view = ContextView::default();
-        for (id, (scope, _)) in recent.into_iter().take(limit) {
+        let mut items = Vec::new();
+        for (id, scope) in recent {
             let item = self
                 .read(id)
                 .await?
                 .ok_or(RuntimeError::Invariant("reported context is missing"))?;
-            let mut proposed = view.clone();
-            proposed.notes.push(note_for_item(scope, &item));
-            if self.counter.count(&proposed.notes_markdown()) <= budget.0 {
-                view = proposed;
-            } else {
-                let mut reference = view.clone();
-                reference.notes.push(ViewNote {
-                    id: Some(id),
-                    scope,
-                    message: None,
-                    content: "내용을 조회할 수 있음".into(),
-                    sources: Vec::new(),
-                    coverage: Vec::new(),
-                });
-                if self.counter.count(&reference.notes_markdown()) <= budget.0 {
-                    view = reference;
-                }
-            }
+            items.push((scope, item));
         }
-        Ok(view.notes_markdown())
+        Ok(lookup::recent_markdown(items))
     }
 
     /// Scope navigation using existing summaries and exact context references.
-    pub async fn scope_context_markdown(
-        &self,
-        scope: ScopeId,
-        budget: TokenSpace,
-    ) -> Result<String, RuntimeError> {
-        let (members, summaries) = {
+    pub async fn scope_context_markdown(&self, scope: ScopeId) -> Result<String, RuntimeError> {
+        let plan = {
             let state = self.state.lock().await;
-            let owned = state
-                .scopes
-                .get(scope)
-                .ok_or(RuntimeError::UnknownScope(scope))?;
-            (
-                owned.members().collect::<Vec<_>>(),
-                state.catalog.summaries(scope).to_vec(),
-            )
+            lookup::scope_plan(&state.scopes, &state.catalog, scope)
+                .ok_or(RuntimeError::UnknownScope(scope))?
         };
-        let mut view = ContextView::default();
-        let mut covered = std::collections::BTreeSet::new();
-        for summary in summaries.iter().rev() {
-            let coverage: Vec<_> = summary.coverage.iter().map(|(id, _)| *id).collect();
-            let mut proposed = view.clone();
-            proposed.notes.push(ViewNote {
-                id: None,
-                scope,
-                message: None,
-                content: summary.content.clone(),
-                sources: Vec::new(),
-                coverage: coverage.clone(),
-            });
-            if self.counter.count(&proposed.notes_markdown()) <= budget.0 {
-                view = proposed;
-                covered.extend(coverage);
-            }
-        }
-        let mut output = view.notes_markdown();
-        let mut extra = Vec::new();
-        for id in members.into_iter().filter(|id| !covered.contains(id)) {
-            let mut proposed = extra.clone();
-            proposed.push(id);
-            let line = format!("추가로 조회할 수 있는 기록: {}\n", references(&proposed));
-            if self.counter.count(&(output.clone() + &line)) > budget.0 {
-                break;
-            }
-            extra = proposed;
-        }
-        if !extra.is_empty() {
-            output.push_str(&format!(
-                "추가로 조회할 수 있는 기록: {}\n",
-                references(&extra)
-            ));
-        }
-        Ok(output)
+        Ok(lookup::scope_markdown(plan))
     }
 
     pub async fn open_context_markdown(
@@ -396,13 +309,7 @@ where
             .scopes
             .owner_of(id)
             .ok_or(RuntimeError::Invariant("context has no Scope owner"))?;
-        Ok(Some(
-            ContextView {
-                notes: vec![note_for_item(scope, &item)],
-                ..ContextView::default()
-            }
-            .notes_markdown(),
-        ))
+        Ok(Some(lookup::item_markdown(scope, &item)))
     }
 
     pub async fn evidence_markdown(
@@ -415,7 +322,7 @@ where
         let InfoKind::Info(info) = item.kind else {
             return Ok(None);
         };
-        let mut output = String::new();
+        let mut excerpts = Vec::new();
         for source in info.sources {
             let raw = self
                 .read(source.raw)
@@ -431,15 +338,9 @@ where
                 .content
                 .get(source.start..source.end)
                 .ok_or(RuntimeError::Invariant("Info source span is invalid"))?;
-            output.push_str(&format!(
-                "근거 #{} [{}..{}]:\n> {}\n",
-                source.raw.0,
-                source.start,
-                source.end,
-                excerpt.replace('\n', "\n> ")
-            ));
+            excerpts.push((source.raw, source.start, source.end, excerpt.to_owned()));
         }
-        Ok(Some(output))
+        Ok(Some(lookup::evidence_markdown(&excerpts)))
     }
 
     pub async fn select_scope(&self, id: ScopeId) -> Result<(), RuntimeError> {

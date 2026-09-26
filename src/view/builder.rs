@@ -8,8 +8,7 @@ use crate::context::{ContextId, ContextItem, InfoKind, MessageRole, ProcessingSt
 use crate::error::ExternalError;
 use crate::heap::{ContextHeap, ZoneKind};
 use crate::scope::Scopes;
-use crate::token::TokenCounter;
-use crate::view::{ContextView, TokenSpace, ViewMessage, ViewNote, note_for_item};
+use crate::view::{ContextView, ViewMessage, ViewNote, note_for_item};
 
 #[derive(Clone, Debug, Error)]
 pub enum ViewError {
@@ -32,18 +31,17 @@ struct StoredCandidate<Data> {
 }
 
 enum Candidate<Data> {
-    Message(ViewMessage),
     Note(ViewNote),
     Explicit(StoredCandidate<Data>),
 }
 
 pub(crate) struct ViewPlan<Data> {
-    candidates: Vec<Candidate<Data>>,
-    budget: TokenSpace,
+    messages: Vec<ViewMessage>,
+    hot_notes: Vec<ViewNote>,
+    additions: Vec<Candidate<Data>>,
 }
 
 pub(crate) struct ViewBuilder<Data> {
-    counter: Arc<dyn TokenCounter>,
     backing: Arc<dyn ColdBacking<Data>>,
 }
 
@@ -51,8 +49,8 @@ impl<Data> ViewBuilder<Data>
 where
     Data: Clone + Send + Sync + 'static,
 {
-    pub fn new(counter: Arc<dyn TokenCounter>, backing: Arc<dyn ColdBacking<Data>>) -> Self {
-        Self { counter, backing }
+    pub fn new(backing: Arc<dyn ColdBacking<Data>>) -> Self {
+        Self { backing }
     }
 
     pub fn prepare<SummaryData>(
@@ -61,12 +59,10 @@ where
         scopes: &Scopes,
         catalog: &ColdCatalog<SummaryData>,
         turn: u64,
-        budget: TokenSpace,
         explicit_cold: &[ContextId],
     ) -> Result<ViewPlan<Data>, ViewError> {
         let current = scopes.current();
-        let mut latest = Vec::new();
-        let mut older = Vec::new();
+        let mut messages = Vec::new();
         let mut infos = Vec::new();
         for zone in [
             ZoneKind::Eden,
@@ -90,11 +86,7 @@ where
                             role: origin.role,
                             content: raw.content.clone(),
                         };
-                        if origin.turn == turn {
-                            latest.push(message);
-                        } else {
-                            older.push(message);
-                        }
+                        messages.push(message);
                     }
                     InfoKind::Info(_) => {
                         infos.push((
@@ -106,19 +98,9 @@ where
                 }
             }
         }
-        latest.sort_by_key(|message| (message.turn, role_order(message.role), message.id));
+        messages.sort_by_key(|message| (message.turn, role_order(message.role), message.id));
         infos.sort_by_key(|(used, id, _)| (std::cmp::Reverse(*used), std::cmp::Reverse(*id)));
-        older.sort_by_key(|message| {
-            (
-                std::cmp::Reverse(message.turn),
-                std::cmp::Reverse(message.id),
-            )
-        });
-
-        let mut candidates = latest
-            .into_iter()
-            .map(Candidate::Message)
-            .collect::<Vec<_>>();
+        let mut additions = Vec::new();
         let mut seen = BTreeSet::new();
         for id in explicit_cold {
             if !seen.insert(*id) {
@@ -126,7 +108,7 @@ where
             }
             if let Some((zone, entry)) = heap.find(*id) {
                 if zone == ZoneKind::Cold {
-                    candidates.push(Candidate::Explicit(StoredCandidate {
+                    additions.push(Candidate::Explicit(StoredCandidate {
                         id: *id,
                         scope: entry.scope,
                         revision: entry.item.revision,
@@ -141,7 +123,7 @@ where
                         "ColdCatalog points to missing Cold entry",
                     ));
                 }
-                candidates.push(Candidate::Explicit(StoredCandidate {
+                additions.push(Candidate::Explicit(StoredCandidate {
                     id: *id,
                     scope: entry.scope,
                     revision: entry.revision,
@@ -150,7 +132,7 @@ where
                 }));
             }
         }
-        candidates.extend(infos.into_iter().map(|(_, _, note)| Candidate::Note(note)));
+        let hot_notes = infos.into_iter().map(|(_, _, note)| note).collect();
 
         let mut relevant_scopes = BTreeSet::from([current]);
         for entry in catalog.entries() {
@@ -167,7 +149,7 @@ where
         relevant_scopes.sort_by_key(|scope| (*scope != current, std::cmp::Reverse(*scope)));
         for scope in relevant_scopes {
             for summary in catalog.summaries(scope).iter().rev() {
-                candidates.push(Candidate::Note(ViewNote {
+                additions.push(Candidate::Note(ViewNote {
                     id: None,
                     scope,
                     message: None,
@@ -177,19 +159,23 @@ where
                 }));
             }
         }
-        candidates.extend(older.into_iter().map(Candidate::Message));
-        Ok(ViewPlan { candidates, budget })
+        Ok(ViewPlan {
+            messages,
+            hot_notes,
+            additions,
+        })
     }
 
     pub async fn build(&self, plan: ViewPlan<Data>) -> Result<ContextView, ViewError> {
         let backing = Arc::clone(&self.backing);
-        let counter = Arc::clone(&self.counter);
         tokio::task::spawn_blocking(move || {
-            let mut view = ContextView::default();
-            for candidate in plan.candidates {
-                let (note, message, explicit_id) = match candidate {
-                    Candidate::Note(note) => (Some(note), None, None),
-                    Candidate::Message(message) => (None, Some(message), None),
+            let mut view = ContextView {
+                notes: plan.hot_notes,
+                messages: plan.messages,
+            };
+            for candidate in plan.additions {
+                let note = match candidate {
+                    Candidate::Note(note) => note,
                     Candidate::Explicit(stored) => {
                         let item = match stored.resident {
                             Some(item) => item,
@@ -206,30 +192,10 @@ where
                                 "backing returned wrong identity, revision, or processing state",
                             ));
                         }
-                        (
-                            Some(note_for_item(stored.scope, &item)),
-                            None,
-                            Some(stored.id),
-                        )
+                        note_for_item(stored.scope, &item)
                     }
                 };
-                let mut proposed = view.clone();
-                if let Some(note) = note {
-                    proposed.notes.push(note);
-                }
-                if let Some(message) = message {
-                    proposed.messages.push(message);
-                    proposed.messages.sort_by_key(|message| {
-                        (message.turn, role_order(message.role), message.id)
-                    });
-                }
-                let tokens = counter.count(&proposed.markdown());
-                if tokens <= plan.budget.0 {
-                    proposed.used_tokens = tokens;
-                    view = proposed;
-                } else if let Some(id) = explicit_id {
-                    view.unfulfilled.push(id);
-                }
+                view.notes.push(note);
             }
             Ok(view)
         })

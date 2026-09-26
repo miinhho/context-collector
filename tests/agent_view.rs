@@ -4,7 +4,6 @@ use context_collector::compaction::scope_summary::{
     ScopeSummarizer, ScopeSummaryInput, ScopeSummaryProposal,
 };
 use context_collector::error::TaskFuture;
-use context_collector::view::TokenSpace;
 use context_collector::{
     InMemoryColdBacking, MessageRole, NoopInfoRefiner, Runtime, RuntimeConfig, ScopeId,
     ScopeReport, TokenCounter, TurnObservation, Watermark,
@@ -51,8 +50,56 @@ fn runtime() -> Runtime {
     .unwrap()
 }
 
+fn wide_runtime() -> Runtime {
+    Runtime::with_counter(
+        RuntimeConfig {
+            watermarks: [Watermark {
+                low: 500,
+                high: 1000,
+            }; 5],
+            hot_high: 4000,
+            processing_batch_tokens: 1024,
+            max_processing_failures: 2,
+        },
+        Arc::new(Bytes),
+        Arc::new(NoopInfoRefiner),
+        Arc::new(Summary),
+        Arc::new(InMemoryColdBacking::default()),
+    )
+    .unwrap()
+}
+
 #[tokio::test]
-async fn view_keeps_turn_messages_in_role_order_and_counts_rendered_markdown() {
+async fn heap_capacity_keeps_the_current_turn_in_the_hot_view() {
+    let runtime = wide_runtime();
+    let receipt = runtime
+        .complete_turn(
+            "긴 사용자 메시지 ".repeat(20),
+            "짧은 답변".into(),
+            TurnObservation::default(),
+        )
+        .await
+        .unwrap();
+    let view = runtime.context_view(&[]).await.unwrap();
+    assert_eq!(
+        view.messages
+            .iter()
+            .map(|message| message.id)
+            .collect::<Vec<_>>(),
+        vec![receipt.user, receipt.agent]
+    );
+    assert_eq!(
+        runtime.zone_of(receipt.user).await,
+        Some(context_collector::ZoneKind::Eden)
+    );
+    assert_eq!(
+        runtime.zone_of(receipt.agent).await,
+        Some(context_collector::ZoneKind::Eden)
+    );
+}
+
+#[tokio::test]
+async fn view_keeps_turn_messages_in_role_order_and_renders_markdown() {
     let runtime = runtime();
     let first = runtime
         .complete_turn(
@@ -72,7 +119,7 @@ async fn view_keeps_turn_messages_in_role_order_and_counts_rendered_markdown() {
         .await
         .unwrap();
     runtime.drain_maintenance().await;
-    let view = runtime.context_view(TokenSpace(1000), &[]).await.unwrap();
+    let view = runtime.context_view(&[]).await.unwrap();
     let actual: Vec<_> = view
         .messages
         .iter()
@@ -93,7 +140,6 @@ async fn view_keeps_turn_messages_in_role_order_and_counts_rendered_markdown() {
     assert!(!markdown.contains("Scope"));
     assert!(!markdown.contains("Cold"));
     assert!(!markdown.contains("RawInfo"));
-    assert_eq!(view.used_tokens, markdown.len());
 }
 
 #[tokio::test]
@@ -151,10 +197,7 @@ async fn backed_message_use_is_indexed_and_retrievable_without_moving_it() {
             .iter()
             .any(|entry| { entry.id == first.user && entry.last_used_turn == Some(receipt.turn) })
     );
-    let recent = runtime
-        .recent_context(Some(first.scope), 3, TokenSpace(1000))
-        .await
-        .unwrap();
+    let recent = runtime.recent_context(Some(first.scope), 3).await.unwrap();
     assert!(recent.contains(&format!("#{} (사용자): 원본 기록", first.user.0)));
     let opened = runtime
         .open_context_markdown(first.user)
@@ -162,13 +205,10 @@ async fn backed_message_use_is_indexed_and_retrievable_without_moving_it() {
         .unwrap()
         .unwrap();
     assert!(opened.contains("원본 기록"));
-    let scope_index = runtime
-        .scope_context_markdown(first.scope, TokenSpace(1000))
-        .await
-        .unwrap();
+    let scope_index = runtime.scope_context_markdown(first.scope).await.unwrap();
     assert!(scope_index.contains("이전 조사에서 갱신 순서를 확인했다"));
     assert!(scope_index.contains(&format!("#{}", first.user.0)));
-    let view = runtime.context_view(TokenSpace(1000), &[]).await.unwrap();
+    let view = runtime.context_view(&[]).await.unwrap();
     assert!(
         view.notes
             .iter()
@@ -178,7 +218,7 @@ async fn backed_message_use_is_indexed_and_retrievable_without_moving_it() {
 }
 
 #[tokio::test]
-async fn explicit_backed_content_reports_when_it_cannot_fit() {
+async fn explicit_backed_content_is_loaded_into_the_view() {
     let runtime = runtime();
     let first = runtime
         .complete_turn(
@@ -211,10 +251,20 @@ async fn explicit_backed_content_reports_when_it_cannot_fit() {
         .await
         .unwrap();
     runtime.drain_maintenance().await;
-    let view = runtime
-        .context_view(TokenSpace(1), &[first.user])
-        .await
-        .unwrap();
-    assert_eq!(view.unfulfilled, vec![first.user]);
-    assert!(view.used_tokens <= 1);
+    let view = runtime.context_view(&[first.user]).await.unwrap();
+    assert!(
+        view.notes.iter().any(|note| {
+            note.id == Some(first.user) && note.content == "아주 긴 원본 기록"
+        })
+    );
+    assert!(
+        view.messages
+            .iter()
+            .any(|message| message.content == "계속")
+    );
+    assert!(
+        view.messages
+            .iter()
+            .any(|message| message.content == "진행")
+    );
 }

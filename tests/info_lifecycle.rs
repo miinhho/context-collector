@@ -229,10 +229,7 @@ async fn settled_raw_is_not_refined_again_in_the_same_hot_lifecycle() {
             .hot_refinement
             .completed
     );
-    let full_view = runtime
-        .context_view(context_collector::TokenSpace(1000), &[])
-        .await
-        .unwrap();
+    let full_view = runtime.context_view(&[]).await.unwrap();
     assert!(
         full_view
             .notes

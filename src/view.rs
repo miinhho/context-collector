@@ -3,11 +3,9 @@ use std::collections::BTreeSet;
 use crate::context::{ContextId, ContextItem, InfoKind, MessageOrigin, MessageRole, ScopeId};
 
 mod builder;
+pub(crate) mod lookup;
 pub(crate) use builder::ViewBuilder;
 pub use builder::ViewError;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct TokenSpace(pub usize);
 
 /// A turn message retained with its original speaker and order.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -34,9 +32,6 @@ pub struct ViewNote {
 pub struct ContextView {
     pub notes: Vec<ViewNote>,
     pub messages: Vec<ViewMessage>,
-    /// Explicit requests that could not fit in the token budget.
-    pub unfulfilled: Vec<ContextId>,
-    pub used_tokens: usize,
 }
 
 impl ContextView {
@@ -74,8 +69,7 @@ impl ContextView {
         output
     }
 
-    /// A Markdown rendering for hosts that send one text block. Hosts using role-aware
-    /// message APIs can use `notes_markdown` and `messages` separately.
+    /// Markdown rendering of selected information and the ordered conversation.
     pub fn markdown(&self) -> String {
         let mut output = self.notes_markdown();
         if !self.messages.is_empty() {

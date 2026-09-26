@@ -12,7 +12,7 @@ use context_collector::compaction::scope_summary::{
 };
 use context_collector::{
     ContextId, InMemoryColdBacking, InfoKind, NoopInfoRefiner, Runtime, RuntimeConfig, ScopeId,
-    ScopeReport, SourceSpan, TokenCounter, TokenSpace, TurnObservation, Watermark, ZoneKind,
+    ScopeReport, SourceSpan, TokenCounter, TurnObservation, Watermark, ZoneKind,
 };
 
 struct Bytes;
@@ -158,7 +158,7 @@ async fn info_refinement_keeps_raw_exact_and_tracks_both_token_kinds() {
     settle(&runtime).await;
     let original = runtime.read(first.user).await.unwrap().unwrap();
     assert_eq!(original.kind, InfoKind::Raw("αbc".into()));
-    let view = runtime.context_view(TokenSpace(300), &[]).await.unwrap();
+    let view = runtime.context_view(&[]).await.unwrap();
     let extracted: Vec<_> = view
         .notes
         .iter()
@@ -233,10 +233,7 @@ async fn cold_catalog_and_backing_preserve_exact_raw_and_scoped_summary() {
         InfoKind::Raw("source payload".into())
     );
     runtime.select_scope(first.scope).await.unwrap();
-    let view = runtime
-        .context_view(TokenSpace(500), &[first.user])
-        .await
-        .unwrap();
+    let view = runtime.context_view(&[first.user]).await.unwrap();
     assert!(view.notes.iter().any(|note| note.id == Some(first.user)));
     assert!(
         view.notes
@@ -244,7 +241,6 @@ async fn cold_catalog_and_backing_preserve_exact_raw_and_scoped_summary() {
             .any(|note| note.content == "opaque scope summary"
                 && note.coverage.contains(&first.user))
     );
-    assert!(view.used_tokens <= 500);
 }
 
 #[tokio::test]

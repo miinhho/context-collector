@@ -1,5 +1,20 @@
+use self::maintenance::MaintenanceRunner;
+use self::turn::TurnRecorder;
+use crate::cold::{
+    CatalogLocation, ColdBacking, ColdCatalogEntry, ColdCompactor, ColdCompactorError,
+};
+use crate::collection::CollectionManager;
+use crate::compaction::objectization::Objectizer;
+use crate::compaction::scope_summary::ScopeSummarizer;
+use crate::compaction::{ObjectizationError, ObjectizationManager};
+use crate::context::ContextObject;
+use crate::heap::{TokenUsage, ZoneKind};
+use crate::token::{TiktokenCounter, TokenCounter};
+use crate::view::{ContextView, TokenSpace, ViewBuilder, ViewError};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use thiserror::Error;
+use tokio::sync::Mutex;
 
 use crate::cold::ColdCatalog;
 use crate::collection::{CollectionScheduler, Job};
@@ -7,14 +22,8 @@ use crate::context::{ContextId, ScopeId};
 use crate::heap::{ContextHeap, Watermark};
 use crate::scope::Scopes;
 
-mod api;
-mod cold_compactor;
 mod maintenance;
-mod objectization;
 mod turn;
-mod view;
-
-pub use api::Runtime;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -68,6 +77,39 @@ pub enum RuntimeError {
     Invariant(&'static str),
 }
 
+impl From<ObjectizationError> for RuntimeError {
+    fn from(error: ObjectizationError) -> Self {
+        match error {
+            ObjectizationError::Objectizer(message) => Self::Objectizer(message),
+            ObjectizationError::Invalid(message) => Self::InvalidObjectization(message),
+            ObjectizationError::Invariant(message) => Self::Invariant(message),
+        }
+    }
+}
+
+impl From<ColdCompactorError> for RuntimeError {
+    fn from(error: ColdCompactorError) -> Self {
+        match error {
+            ColdCompactorError::Summary(message) => Self::ScopeSummary(message),
+            ColdCompactorError::InvalidSummary(message) => Self::InvalidScopeSummary(message),
+            ColdCompactorError::Backing(message) => Self::ColdBacking(message),
+            ColdCompactorError::Worker(message) => Self::Worker(message),
+            ColdCompactorError::Invariant(message) => Self::Invariant(message),
+        }
+    }
+}
+
+impl From<ViewError> for RuntimeError {
+    fn from(error: ViewError) -> Self {
+        match error {
+            ViewError::UnknownContext(id) => Self::UnknownContext(id),
+            ViewError::Invariant(message) => Self::Invariant(message),
+            ViewError::ColdBacking(message) => Self::ColdBacking(message),
+            ViewError::Worker(message) => Self::Worker(message),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TurnReceipt {
     pub turn: u64,
@@ -118,5 +160,178 @@ impl RuntimeState {
         let id = ContextId(self.next_id);
         self.next_id += 1;
         id
+    }
+}
+
+#[derive(Clone)]
+pub struct Runtime {
+    state: Arc<Mutex<RuntimeState>>,
+    recorder: Arc<TurnRecorder>,
+    view: Arc<ViewBuilder>,
+    maintenance: Arc<MaintenanceRunner>,
+    backing: Arc<dyn ColdBacking>,
+}
+
+impl Runtime {
+    pub fn new(
+        config: RuntimeConfig,
+        objectizer: Arc<dyn Objectizer>,
+        summarizer: Arc<dyn ScopeSummarizer>,
+        backing: Arc<dyn ColdBacking>,
+    ) -> Result<Self, RuntimeError> {
+        Self::with_counter(
+            config,
+            Arc::new(TiktokenCounter),
+            objectizer,
+            summarizer,
+            backing,
+        )
+    }
+
+    pub fn with_counter(
+        config: RuntimeConfig,
+        counter: Arc<dyn TokenCounter>,
+        objectizer: Arc<dyn Objectizer>,
+        summarizer: Arc<dyn ScopeSummarizer>,
+        backing: Arc<dyn ColdBacking>,
+    ) -> Result<Self, RuntimeError> {
+        let state = Arc::new(Mutex::new(RuntimeState::new(config)?));
+        let recorder = Arc::new(TurnRecorder::new(Arc::clone(&counter)));
+        let view = Arc::new(ViewBuilder::new(Arc::clone(&counter), Arc::clone(&backing)));
+        let maintenance = Arc::new(MaintenanceRunner::new(
+            Arc::clone(&state),
+            CollectionManager::new(config.hot_high),
+            ObjectizationManager::new(objectizer, counter),
+            ColdCompactor::new(summarizer, Arc::clone(&backing)),
+        ));
+        Ok(Self {
+            state,
+            recorder,
+            view,
+            maintenance,
+            backing,
+        })
+    }
+
+    pub async fn complete_turn(
+        &self,
+        user: String,
+        agent: String,
+        report: TurnObservation,
+    ) -> Result<TurnReceipt, RuntimeError> {
+        let receipt = {
+            let mut state = self.state.lock().await;
+            self.recorder.record(&mut state, user, agent, report)?
+        };
+        let runner = Arc::clone(&self.maintenance);
+        tokio::spawn(async move { runner.drain().await });
+        Ok(receipt)
+    }
+
+    pub async fn read(&self, id: ContextId) -> Result<Option<ContextObject>, RuntimeError> {
+        let expected_revision = {
+            let state = self.state.lock().await;
+            if let Some((_, entry)) = state.heap.find(id) {
+                return Ok(Some(entry.object.clone()));
+            }
+            match state.catalog.get(id) {
+                None => return Ok(None),
+                Some(entry) if entry.location == CatalogLocation::ColdZone => {
+                    return Err(RuntimeError::Invariant(
+                        "ColdCatalog points to missing Cold entry",
+                    ));
+                }
+                Some(entry) => entry.revision,
+            }
+        };
+        let backing = Arc::clone(&self.backing);
+        tokio::task::spawn_blocking(move || {
+            let object = backing
+                .load(id)
+                .map_err(RuntimeError::ColdBacking)?
+                .ok_or(RuntimeError::Invariant("backing lost cataloged object"))?;
+            if object.id != id || object.revision != expected_revision {
+                return Err(RuntimeError::Invariant(
+                    "backing returned wrong identity or revision",
+                ));
+            }
+            Ok(Some(object))
+        })
+        .await
+        .map_err(|error| RuntimeError::Worker(error.to_string()))?
+    }
+
+    pub async fn context_view(
+        &self,
+        budget: TokenSpace,
+        explicit_cold: &[ContextId],
+    ) -> Result<ContextView, RuntimeError> {
+        let plan = {
+            let state = self.state.lock().await;
+            self.view.prepare(
+                &state.heap,
+                &state.scopes,
+                &state.catalog,
+                state.turn,
+                budget,
+                explicit_cold,
+            )?
+        };
+        Ok(self.view.build(plan).await?)
+    }
+
+    pub async fn select_scope(&self, id: ScopeId) -> Result<(), RuntimeError> {
+        let mut state = self.state.lock().await;
+        if state.scopes.select_existing(id) {
+            Ok(())
+        } else {
+            Err(RuntimeError::UnknownScope(id))
+        }
+    }
+
+    pub async fn current_scope(&self) -> ScopeId {
+        self.state.lock().await.scopes.current()
+    }
+    pub async fn turn(&self) -> u64 {
+        self.state.lock().await.turn
+    }
+    pub async fn pending_jobs(&self) -> usize {
+        self.state.lock().await.scheduler.pending()
+    }
+    pub async fn cold_scope_entries(&self, scope: ScopeId) -> Vec<ColdCatalogEntry> {
+        self.state
+            .lock()
+            .await
+            .catalog
+            .entries_for_scope(scope)
+            .cloned()
+            .collect()
+    }
+    pub async fn protect(&self, id: ContextId, protected: bool) -> Result<(), RuntimeError> {
+        let mut state = self.state.lock().await;
+        let zone = state
+            .heap
+            .find(id)
+            .map(|(zone, _)| zone)
+            .ok_or(RuntimeError::UnknownContext(id))?;
+        state
+            .heap
+            .zone_mut(zone)
+            .get_mut(id)
+            .expect("found entry")
+            .protected = protected;
+        Ok(())
+    }
+    pub async fn zone_of(&self, id: ContextId) -> Option<ZoneKind> {
+        self.state.lock().await.heap.find(id).map(|(zone, _)| zone)
+    }
+    pub async fn zone_usage(&self, zone: ZoneKind) -> TokenUsage {
+        self.state.lock().await.heap.zone(zone).usage()
+    }
+    pub async fn maintenance_errors(&self) -> Vec<RuntimeError> {
+        self.maintenance.errors().await
+    }
+    pub async fn drain_maintenance(&self) -> Vec<MaintenanceResult> {
+        self.maintenance.drain().await
     }
 }

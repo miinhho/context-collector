@@ -1,4 +1,3 @@
-mod adapters;
 mod openai;
 
 use std::future::Future;
@@ -6,7 +5,6 @@ use std::pin::Pin;
 
 use serde_json::Value;
 
-pub use adapters::{LlmObjectizer, LlmScopeSummarizer};
 pub use openai::{OpenAiClientConfig, OpenAiResponsesClient};
 
 #[derive(Clone, Debug)]
@@ -27,7 +25,7 @@ pub struct LlmRequest {
     pub task: LlmTaskConfig,
     pub instructions: String,
     pub input: String,
-    pub schema_name: &'static str,
+    pub schema_name: String,
     pub schema: Value,
 }
 

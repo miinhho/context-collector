@@ -7,7 +7,17 @@ use crate::heap::ZoneKind;
 use crate::token::TokenCounter;
 use crate::view::{ColdScopeSummaryView, ColdScopeView, ContextView, ContextViewItem, TokenSpace};
 
-use super::{RuntimeError, RuntimeState};
+use crate::cold::ColdCatalog;
+use crate::heap::ContextHeap;
+use crate::scope::Scopes;
+
+#[derive(Debug)]
+pub(crate) enum ViewError {
+    UnknownContext(ContextId),
+    Invariant(&'static str),
+    ColdBacking(String),
+    Worker(String),
+}
 
 struct PlannedItem {
     id: ContextId,
@@ -17,13 +27,13 @@ struct PlannedItem {
     resident: Option<ContextObject>,
 }
 
-pub(super) struct ViewPlan {
+pub(crate) struct ViewPlan {
     items: Vec<PlannedItem>,
     cold_scopes: Vec<ColdScopeView>,
     used_tokens: usize,
 }
 
-pub(super) struct ViewBuilder {
+pub(crate) struct ViewBuilder {
     counter: Arc<dyn TokenCounter>,
     backing: Arc<dyn ColdBacking>,
 }
@@ -35,10 +45,13 @@ impl ViewBuilder {
 
     pub fn prepare(
         &self,
-        state: &RuntimeState,
+        heap: &ContextHeap,
+        scopes: &Scopes,
+        catalog: &ColdCatalog,
+        turn: u64,
         budget: TokenSpace,
         explicit_cold: &[ContextId],
-    ) -> Result<ViewPlan, RuntimeError> {
+    ) -> Result<ViewPlan, ViewError> {
         let mut items = Vec::new();
         let mut used_tokens: usize = 0;
         let mut seen = BTreeSet::new();
@@ -47,7 +60,7 @@ impl ViewBuilder {
                 continue;
             }
             let (scope, zone, resident, tokens, revision) =
-                if let Some((zone, entry)) = state.heap.find(*id) {
+                if let Some((zone, entry)) = heap.find(*id) {
                     if zone != ZoneKind::Cold {
                         continue;
                     }
@@ -59,12 +72,9 @@ impl ViewBuilder {
                         entry.object.revision,
                     )
                 } else {
-                    let entry = state
-                        .catalog
-                        .get(*id)
-                        .ok_or(RuntimeError::UnknownContext(*id))?;
+                    let entry = catalog.get(*id).ok_or(ViewError::UnknownContext(*id))?;
                     if entry.location != CatalogLocation::Backing {
-                        return Err(RuntimeError::Invariant(
+                        return Err(ViewError::Invariant(
                             "ColdCatalog points to missing Cold entry",
                         ));
                     }
@@ -82,7 +92,7 @@ impl ViewBuilder {
             });
             used_tokens += tokens;
         }
-        let current = state.scopes.current();
+        let current = scopes.current();
         let mut candidates = Vec::new();
         for zone in [
             ZoneKind::Eden,
@@ -90,8 +100,8 @@ impl ViewBuilder {
             ZoneKind::Mature,
             ZoneKind::Cooling,
         ] {
-            for entry in state.heap.zone(zone).entries() {
-                if entry.scope == current || entry.last_used_turn == Some(state.turn) {
+            for entry in heap.zone(zone).entries() {
+                if entry.scope == current || entry.last_used_turn == Some(turn) {
                     let priority = if entry.scope == current { 0 } else { 1 };
                     candidates.push((priority, zone, entry.id, entry.tokens));
                 }
@@ -102,7 +112,7 @@ impl ViewBuilder {
             if used_tokens.saturating_add(tokens) > budget.0 {
                 continue;
             }
-            let entry = state.heap.zone(zone).get(id).expect("listed entry exists");
+            let entry = heap.zone(zone).get(id).expect("listed entry exists");
             items.push(PlannedItem {
                 id,
                 revision: entry.object.revision,
@@ -113,14 +123,14 @@ impl ViewBuilder {
             used_tokens += tokens;
         }
         let mut scope_counts = BTreeMap::<ScopeId, usize>::new();
-        for entry in state.catalog.entries() {
+        for entry in catalog.entries() {
             *scope_counts.entry(entry.scope).or_default() += 1;
         }
         let mut scope_counts: Vec<_> = scope_counts.into_iter().collect();
         scope_counts.sort_by_key(|(scope, _)| {
             (
                 *scope != current,
-                state.catalog.summaries(*scope).is_empty(),
+                catalog.summaries(*scope).is_empty(),
                 std::cmp::Reverse(scope.0),
             )
         });
@@ -137,7 +147,7 @@ impl ViewBuilder {
                 summaries: Vec::new(),
             };
             used_tokens += header_tokens;
-            for summary in state.catalog.summaries(scope) {
+            for summary in catalog.summaries(scope) {
                 let description = format!(
                     "{} {:?} {}",
                     summary.content,
@@ -164,7 +174,7 @@ impl ViewBuilder {
         })
     }
 
-    pub async fn build(&self, plan: ViewPlan) -> Result<ContextView, RuntimeError> {
+    pub async fn build(&self, plan: ViewPlan) -> Result<ContextView, ViewError> {
         let backing = Arc::clone(&self.backing);
         tokio::task::spawn_blocking(move || {
             let mut items = Vec::with_capacity(plan.items.len());
@@ -173,11 +183,11 @@ impl ViewBuilder {
                     Some(object) => object,
                     None => backing
                         .load(item.id)
-                        .map_err(RuntimeError::ColdBacking)?
-                        .ok_or(RuntimeError::Invariant("backing lost cataloged object"))?,
+                        .map_err(ViewError::ColdBacking)?
+                        .ok_or(ViewError::Invariant("backing lost cataloged object"))?,
                 };
                 if object.id != item.id || object.revision != item.revision {
-                    return Err(RuntimeError::Invariant(
+                    return Err(ViewError::Invariant(
                         "backing returned wrong identity or revision",
                     ));
                 }
@@ -194,6 +204,6 @@ impl ViewBuilder {
             })
         })
         .await
-        .map_err(|error| RuntimeError::Worker(error.to_string()))?
+        .map_err(|error| ViewError::Worker(error.to_string()))?
     }
 }

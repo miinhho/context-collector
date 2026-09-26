@@ -2,10 +2,53 @@ use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
 
-use serde_json::json;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use super::{LlmClient, LlmRequest};
 use crate::token::{TiktokenCounter, TokenCounter};
+
+#[derive(Serialize)]
+struct ResponsesRequest<'a> {
+    model: &'a str,
+    instructions: &'a str,
+    input: &'a str,
+    max_output_tokens: u32,
+    store: bool,
+    text: TextFormat<'a>,
+}
+
+#[derive(Serialize)]
+struct TextFormat<'a> {
+    format: JsonSchemaFormat<'a>,
+}
+
+#[derive(Serialize)]
+struct JsonSchemaFormat<'a> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    name: &'a str,
+    strict: bool,
+    schema: &'a Value,
+}
+
+#[derive(Deserialize)]
+struct ResponsesResult {
+    status: String,
+    output: Vec<OutputItem>,
+}
+
+#[derive(Deserialize)]
+struct OutputItem {
+    content: Vec<OutputContent>,
+}
+
+#[derive(Deserialize)]
+struct OutputContent {
+    #[serde(rename = "type")]
+    kind: String,
+    text: Option<String>,
+}
 
 pub struct OpenAiClientConfig {
     pub api_key: String,
@@ -67,19 +110,21 @@ impl LlmClient for OpenAiResponsesClient {
             if input_tokens > request.task.max_input_tokens {
                 return Err("LLM request exceeds configured input token limit".into());
             }
-            let body = json!({
-                "model": request.task.model,
-                "instructions": request.instructions,
-                "input": request.input,
-                "max_output_tokens": request.task.max_output_tokens,
-                "store": false,
-                "text": {"format": {
-                    "type": "json_schema",
-                    "name": request.schema_name,
-                    "strict": true,
-                    "schema": request.schema,
-                }},
-            });
+            let body = ResponsesRequest {
+                model: &request.task.model,
+                instructions: &request.instructions,
+                input: &request.input,
+                max_output_tokens: request.task.max_output_tokens,
+                store: false,
+                text: TextFormat {
+                    format: JsonSchemaFormat {
+                        kind: "json_schema",
+                        name: &request.schema_name,
+                        strict: true,
+                        schema: &request.schema,
+                    },
+                },
+            };
             let response = self
                 .http
                 .post(self.endpoint.clone())
@@ -100,26 +145,17 @@ impl LlmClient for OpenAiResponsesClient {
                 }
                 bytes.extend_from_slice(&chunk);
             }
-            let body: serde_json::Value =
+            let body: ResponsesResult =
                 serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
-            if body.get("status").and_then(|v| v.as_str()) != Some("completed") {
+            if body.status != "completed" {
                 return Err("LLM response was not completed".into());
             }
-            let text = body
-                .get("output")
-                .and_then(|v| v.as_array())
+            body.output
                 .into_iter()
-                .flatten()
-                .flat_map(|item| {
-                    item.get("content")
-                        .and_then(|v| v.as_array())
-                        .into_iter()
-                        .flatten()
-                })
-                .find(|content| content.get("type").and_then(|v| v.as_str()) == Some("output_text"))
-                .and_then(|content| content.get("text").and_then(|v| v.as_str()))
-                .ok_or("LLM response has no output text")?;
-            Ok(text.to_owned())
+                .flat_map(|item| item.content)
+                .find(|content| content.kind == "output_text")
+                .and_then(|content| content.text)
+                .ok_or("LLM response has no output text".into())
         })
     }
 }

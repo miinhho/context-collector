@@ -3,14 +3,14 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
-use context_collector::compaction::objectization::{
-    ObjectizationInput, Objectizer, StructuredProposal,
+use context_collector::compaction::refinement::{
+    InfoDraft, InfoRefiner, RefinementInput, RefinementResult,
 };
 use context_collector::compaction::scope_summary::{
     ScopeSummarizer, ScopeSummaryInput, ScopeSummaryProposal,
 };
 use context_collector::{
-    ColdBacking, InMemoryColdBacking, Representation, Runtime, RuntimeConfig, ScopeId, ScopeReport,
+    ColdBacking, InMemoryColdBacking, InfoKind, Runtime, RuntimeConfig, ScopeId, ScopeReport,
     SourceSpan, TokenCounter, TurnObservation, Watermark,
 };
 
@@ -33,32 +33,27 @@ impl TokenCounter for Bytes {
 }
 
 // All call settings and state belong to the application's work implementation.
-struct UserObjectizer {
+struct UserInfoRefiner {
     model: String,
     prompt: String,
     observed: Mutex<Vec<(ScopeId, context_collector::ZoneKind)>>,
 }
 
-impl Objectizer<FactData> for UserObjectizer {
-    fn extract<'a>(
+impl InfoRefiner<FactData> for UserInfoRefiner {
+    fn refine<'a>(
         &'a self,
-        input: ObjectizationInput<'a>,
-    ) -> Pin<
-        Box<
-            dyn Future<Output = Result<Vec<StructuredProposal<FactData>>, ExternalError>>
-                + Send
-                + 'a,
-        >,
-    > {
+        input: RefinementInput<'a>,
+    ) -> Pin<Box<dyn Future<Output = Result<RefinementResult<FactData>, ExternalError>> + Send + 'a>>
+    {
         Box::pin(async move {
             self.observed
                 .lock()
                 .unwrap()
                 .push((input.scope, input.zone));
             let Some(raw) = input.raw.iter().find(|item| !item.content.is_empty()) else {
-                return Ok(Vec::new());
+                return Ok(Vec::new().into());
             };
-            Ok(vec![StructuredProposal {
+            Ok(vec![InfoDraft {
                 content: format!("{}: {}", self.prompt, raw.content),
                 sources: vec![SourceSpan {
                     raw: raw.id,
@@ -70,7 +65,8 @@ impl Objectizer<FactData> for UserObjectizer {
                     category: "user-defined".into(),
                     model_used: self.model.clone(),
                 },
-            }])
+            }]
+            .into())
         })
     }
 }
@@ -93,8 +89,8 @@ impl ScopeSummarizer<FactData, SummaryData> for UserSummarizer {
         Box::pin(async move {
             Ok(Some(ScopeSummaryProposal {
                 content: format!("scope {} summary", scope.0),
-                references: inputs.iter().map(|input| input.object.id).collect(),
-                covered: inputs.iter().map(|input| input.object.id).collect(),
+                references: inputs.iter().map(|input| input.info.id).collect(),
+                covered: inputs.iter().map(|input| input.info.id).collect(),
                 data: SummaryData {
                     navigation_tag: self.tag.clone(),
                 },
@@ -104,8 +100,8 @@ impl ScopeSummarizer<FactData, SummaryData> for UserSummarizer {
 }
 
 #[tokio::test]
-async fn user_data_survives_structuring_cold_backing_and_catalog_retrieval() {
-    let objectizer = Arc::new(UserObjectizer {
+async fn user_data_survives_refinement_cold_backing_and_catalog_retrieval() {
+    let refiner = Arc::new(UserInfoRefiner {
         model: "chosen-by-user".into(),
         prompt: "extract".into(),
         observed: Mutex::new(Vec::new()),
@@ -115,9 +111,11 @@ async fn user_data_survives_structuring_cold_backing_and_catalog_retrieval() {
         RuntimeConfig {
             watermarks: [Watermark { low: 1, high: 4 }; 5],
             hot_high: 100,
+            processing_batch_tokens: 1024,
+            max_processing_failures: 3,
         },
         Arc::new(Bytes),
-        objectizer.clone(),
+        refiner.clone(),
         Arc::new(UserSummarizer {
             tag: "memory-navigation".into(),
         }),
@@ -138,18 +136,16 @@ async fn user_data_survives_structuring_cold_backing_and_catalog_retrieval() {
         .await
         .unwrap();
     runtime.drain_maintenance().await;
-    assert!(!objectizer.observed.lock().unwrap().is_empty());
-    let structured_id = runtime
+    assert!(!refiner.observed.lock().unwrap().is_empty());
+    let info_id = runtime
         .context_view(context_collector::TokenSpace(1000), &[])
         .await
         .unwrap()
         .items
         .into_iter()
-        .find_map(|item| match item.object.representation {
-            Representation::Structured { sources, .. }
-                if sources.iter().any(|source| source.raw == first.user) =>
-            {
-                Some(item.object.id)
+        .find_map(|item| match item.item.kind {
+            InfoKind::Info(info) if info.sources.iter().any(|source| source.raw == first.user) => {
+                Some(item.item.id)
             }
             _ => None,
         })
@@ -175,17 +171,18 @@ async fn user_data_survives_structuring_cold_backing_and_catalog_retrieval() {
         .await
         .unwrap();
     runtime.drain_maintenance().await;
-    let object = runtime.read(structured_id).await.unwrap().unwrap();
-    let Representation::Structured { data, .. } = object.representation else {
-        panic!("expected Structured");
+    let info_item = runtime.read(info_id).await.unwrap().unwrap();
+    let InfoKind::Info(info) = info_item.kind else {
+        panic!("expected Info");
     };
+    let data = info.data;
     assert_eq!(data.category, "user-defined");
     assert_eq!(data.model_used, "chosen-by-user");
-    assert_eq!(runtime.zone_of(structured_id).await, None);
-    let stored = backing.load(structured_id).unwrap().unwrap();
-    assert_eq!(stored.id, structured_id);
-    assert!(matches!(stored.representation,
-        Representation::Structured { data: FactData { model_used, .. }, .. }
+    assert_eq!(runtime.zone_of(info_id).await, None);
+    let stored = backing.load(info_id).unwrap().unwrap();
+    assert_eq!(stored.id, info_id);
+    assert!(matches!(stored.kind,
+        InfoKind::Info(context_collector::Info { data: FactData { model_used, .. }, .. })
             if model_used == "chosen-by-user"));
     let summaries = runtime.cold_scope_summaries(first.scope).await;
     assert!(
@@ -202,7 +199,7 @@ struct CorruptDataBacking {
     stored: Mutex<
         std::collections::BTreeMap<
             context_collector::ContextId,
-            context_collector::ContextObject<FactData>,
+            context_collector::ContextItem<FactData>,
         >,
     >,
 }
@@ -210,7 +207,7 @@ struct CorruptDataBacking {
 impl ColdBacking<FactData> for CorruptDataBacking {
     fn store(
         &self,
-        object: &context_collector::ContextObject<FactData>,
+        object: &context_collector::ContextItem<FactData>,
     ) -> Result<(), ExternalError> {
         self.stored
             .lock()
@@ -222,7 +219,7 @@ impl ColdBacking<FactData> for CorruptDataBacking {
     fn load(
         &self,
         id: context_collector::ContextId,
-    ) -> Result<Option<context_collector::ContextObject<FactData>>, ExternalError> {
+    ) -> Result<Option<context_collector::ContextItem<FactData>>, ExternalError> {
         Ok(self
             .stored
             .lock()
@@ -230,8 +227,8 @@ impl ColdBacking<FactData> for CorruptDataBacking {
             .get(&id)
             .cloned()
             .map(|mut object| {
-                if let Representation::Structured { data, .. } = &mut object.representation {
-                    data.category = "changed after store".into();
+                if let InfoKind::Info(info) = &mut object.kind {
+                    info.data.category = "changed after store".into();
                 }
                 object
             }))
@@ -244,9 +241,11 @@ async fn changed_user_data_fails_exact_reload_before_cold_removal() {
         RuntimeConfig {
             watermarks: [Watermark { low: 1, high: 4 }; 5],
             hot_high: 100,
+            processing_batch_tokens: 1024,
+            max_processing_failures: 3,
         },
         Arc::new(Bytes),
-        Arc::new(UserObjectizer {
+        Arc::new(UserInfoRefiner {
             model: "chosen-by-user".into(),
             prompt: "extract".into(),
             observed: Mutex::new(Vec::new()),
@@ -317,18 +316,13 @@ async fn changed_user_data_fails_exact_reload_before_cold_removal() {
 #[error("application model call failed")]
 struct UserTaskError;
 
-struct FailingObjectizer;
-impl Objectizer<FactData> for FailingObjectizer {
-    fn extract<'a>(
+struct FailingInfoRefiner;
+impl InfoRefiner<FactData> for FailingInfoRefiner {
+    fn refine<'a>(
         &'a self,
-        _input: ObjectizationInput<'a>,
-    ) -> Pin<
-        Box<
-            dyn Future<Output = Result<Vec<StructuredProposal<FactData>>, ExternalError>>
-                + Send
-                + 'a,
-        >,
-    > {
+        _input: RefinementInput<'a>,
+    ) -> Pin<Box<dyn Future<Output = Result<RefinementResult<FactData>, ExternalError>> + Send + 'a>>
+    {
         Box::pin(async { Err(Arc::new(UserTaskError) as ExternalError) })
     }
 }
@@ -339,9 +333,11 @@ async fn task_failure_retains_application_error_as_source() {
         RuntimeConfig {
             watermarks: [Watermark { low: 1, high: 4 }; 5],
             hot_high: 100,
+            processing_batch_tokens: 1024,
+            max_processing_failures: 3,
         },
         Arc::new(Bytes),
-        Arc::new(FailingObjectizer),
+        Arc::new(FailingInfoRefiner),
         Arc::new(context_collector::NoopScopeSummarizer),
         Arc::new(InMemoryColdBacking::<FactData>::default()),
     )
@@ -363,32 +359,27 @@ async fn task_failure_retains_application_error_as_source() {
             .iter()
             .any(|error| matches!(
                 error,
-                context_collector::RuntimeError::Objectization(
-                    context_collector::compaction::ObjectizationError::Objectizer(source)
+                context_collector::RuntimeError::Refinement(
+                    context_collector::compaction::RefinementError::InfoRefiner(source)
                 ) if source.downcast_ref::<UserTaskError>().is_some()
             ))
     );
 }
 
-struct ChangingDataObjectizer {
+struct ChangingDataInfoRefiner {
     calls: std::sync::atomic::AtomicUsize,
 }
 
-impl Objectizer<FactData> for ChangingDataObjectizer {
-    fn extract<'a>(
+impl InfoRefiner<FactData> for ChangingDataInfoRefiner {
+    fn refine<'a>(
         &'a self,
-        input: ObjectizationInput<'a>,
-    ) -> Pin<
-        Box<
-            dyn Future<Output = Result<Vec<StructuredProposal<FactData>>, ExternalError>>
-                + Send
-                + 'a,
-        >,
-    > {
+        input: RefinementInput<'a>,
+    ) -> Pin<Box<dyn Future<Output = Result<RefinementResult<FactData>, ExternalError>> + Send + 'a>>
+    {
         Box::pin(async move {
             let raw = &input.raw[0];
             let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Ok(vec![StructuredProposal {
+            Ok(vec![InfoDraft {
                 content: "same grounded fact".into(),
                 sources: vec![SourceSpan {
                     raw: raw.id,
@@ -400,23 +391,26 @@ impl Objectizer<FactData> for ChangingDataObjectizer {
                     category: "same".into(),
                     model_used: format!("call-{call}"),
                 },
-            }])
+            }]
+            .into())
         })
     }
 }
 
 #[tokio::test]
-async fn changing_user_metadata_does_not_duplicate_the_same_grounded_object() {
-    let objectizer = Arc::new(ChangingDataObjectizer {
+async fn changing_user_metadata_does_not_duplicate_the_same_grounded_info() {
+    let refiner = Arc::new(ChangingDataInfoRefiner {
         calls: std::sync::atomic::AtomicUsize::new(0),
     });
     let runtime = Runtime::<FactData, SummaryData>::with_counter(
         RuntimeConfig {
             watermarks: [Watermark { low: 1, high: 4 }; 5],
             hot_high: 100,
+            processing_batch_tokens: 1024,
+            max_processing_failures: 3,
         },
         Arc::new(Bytes),
-        objectizer.clone(),
+        refiner.clone(),
         Arc::new(context_collector::NoopScopeSummarizer),
         Arc::new(InMemoryColdBacking::<FactData>::default()),
     )
@@ -436,7 +430,7 @@ async fn changing_user_metadata_does_not_duplicate_the_same_grounded_object() {
         .await
         .unwrap();
     runtime.drain_maintenance().await;
-    assert!(objectizer.calls.load(std::sync::atomic::Ordering::SeqCst) > 1);
+    assert!(refiner.calls.load(std::sync::atomic::Ordering::SeqCst) > 1);
     let same_fact_count = runtime
         .context_view(context_collector::TokenSpace(1000), &[])
         .await
@@ -445,10 +439,10 @@ async fn changing_user_metadata_does_not_duplicate_the_same_grounded_object() {
         .into_iter()
         .filter(|item| {
             matches!(
-                &item.object.representation,
-                Representation::Structured { content, sources, .. }
-                    if content == "same grounded fact"
-                        && sources.iter().any(|source| source.raw == first.user)
+                &item.item.kind,
+                InfoKind::Info(info)
+                    if info.content == "same grounded fact"
+                        && info.sources.iter().any(|source| source.raw == first.user)
             )
         })
         .count();

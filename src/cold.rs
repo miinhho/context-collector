@@ -2,9 +2,12 @@ mod backing;
 mod batch;
 mod catalog;
 mod compactor;
+mod summary;
 
 pub use backing::{ColdBacking, InMemoryColdBacking};
 pub use batch::{BackingRecord, ColdCompactionBatch, VerifiedColdCompactionBatch};
 pub use catalog::{CatalogLocation, ColdCatalog, ColdCatalogEntry, ScopeSummary};
 pub(crate) use compactor::ColdCompactor;
-pub use compactor::{ColdCompactorError, ColdSummaryValidationError};
+pub use compactor::ColdCompactorError;
+pub(crate) use summary::ColdSummaryManager;
+pub use summary::{ColdSummaryError, ColdSummaryValidationError};

@@ -10,13 +10,16 @@ pub mod token;
 pub mod view;
 
 pub use cold::{ColdBacking, ColdCompactionBatch, InMemoryColdBacking};
-pub use compaction::objectization::{
-    NoopObjectizer, ObjectizationInput, Objectizer, RawInput, StructuredProposal,
+pub use compaction::refinement::{
+    InfoDraft, InfoRefiner, NoopInfoRefiner, RawInfoInput, RefinementInput,
 };
 pub use compaction::scope_summary::{
     NoopScopeSummarizer, ScopeSummarizer, ScopeSummaryInput, ScopeSummaryProposal,
 };
-pub use context::{ContextId, ContextObject, Representation, ScopeId, SourceSpan};
+pub use context::{
+    ContextId, ContextItem, Info, InfoKind, ProcessingAttempt, ProcessingFailure, ProcessingState,
+    RawInfo, ScopeId, SourceSpan,
+};
 pub use heap::{TokenUsage, Watermark, ZoneKind};
 pub use runtime::Runtime;
 pub use runtime::{RuntimeConfig, RuntimeError, ScopeReport, TurnObservation};

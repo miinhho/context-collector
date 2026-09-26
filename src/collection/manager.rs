@@ -91,7 +91,7 @@ impl CollectionManager {
             Ok(()) => Ok(()),
             Err(entry) => {
                 heap.zone_mut(source)
-                    .insert(entry)
+                    .insert(*entry)
                     .map_err(|_| CollectionError::RollbackFailed)?;
                 Err(CollectionError::TargetInsertionFailed)
             }

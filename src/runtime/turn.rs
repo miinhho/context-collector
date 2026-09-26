@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::context::{ContextId, ContextObject, ScopeId};
+use crate::context::{ContextId, ContextItem, ScopeId};
 use crate::heap::{ZoneEntry, ZoneKind};
 use crate::token::TokenCounter;
 
@@ -63,11 +63,11 @@ impl TurnRecorder {
     ) -> Result<ContextId, RuntimeError> {
         let id = state.next_context_id();
         let tokens = self.counter.count(&content);
-        let object = ContextObject::raw(id, content);
+        let item = ContextItem::raw(id, content);
         state
             .heap
             .zone_mut(ZoneKind::Eden)
-            .insert(ZoneEntry::new(object, scope, tokens, state.turn))
+            .insert(ZoneEntry::new(item, scope, tokens, state.turn))
             .map_err(|_| RuntimeError::Invariant("duplicate Eden id"))?;
         if !state.scopes.add(scope, id) {
             return Err(RuntimeError::Invariant("scope membership insertion failed"));

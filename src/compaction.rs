@@ -1,6 +1,6 @@
 mod manager;
-pub mod objectization;
+pub mod refinement;
 pub mod scope_summary;
 
-pub use manager::ObjectizationError;
-pub(crate) use manager::{ObjectizationCommit, ObjectizationManager};
+pub use manager::RefinementError;
+pub(crate) use manager::{RefinementCommit, RefinementManager};

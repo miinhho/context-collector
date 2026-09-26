@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::context::{ContextId, ContextObject, ScopeId};
+use crate::context::{ContextId, ContextItem, ScopeId};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum ZoneKind {
@@ -50,19 +50,19 @@ impl Watermark {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct TokenUsage {
     pub raw: usize,
-    pub structured: usize,
+    pub info: usize,
 }
 
 impl TokenUsage {
     pub fn total(self) -> usize {
-        self.raw + self.structured
+        self.raw + self.info
     }
 
     fn add<Data>(&mut self, entry: &ZoneEntry<Data>) {
         if entry.raw {
             self.raw += entry.tokens;
         } else {
-            self.structured += entry.tokens;
+            self.info += entry.tokens;
         }
     }
 
@@ -70,7 +70,7 @@ impl TokenUsage {
         if entry.raw {
             self.raw -= entry.tokens;
         } else {
-            self.structured -= entry.tokens;
+            self.info -= entry.tokens;
         }
     }
 }
@@ -79,7 +79,7 @@ impl TokenUsage {
 pub struct ZoneEntry<Data = ()> {
     pub(crate) id: ContextId,
     pub(crate) scope: ScopeId,
-    pub(crate) object: ContextObject<Data>,
+    pub(crate) item: ContextItem<Data>,
     pub(crate) tokens: usize,
     pub(crate) raw: bool,
     pub(crate) born_turn: u64,
@@ -89,17 +89,12 @@ pub struct ZoneEntry<Data = ()> {
 }
 
 impl<Data> ZoneEntry<Data> {
-    pub(crate) fn new(
-        object: ContextObject<Data>,
-        scope: ScopeId,
-        tokens: usize,
-        turn: u64,
-    ) -> Self {
+    pub(crate) fn new(item: ContextItem<Data>, scope: ScopeId, tokens: usize, turn: u64) -> Self {
         Self {
-            id: object.id,
+            id: item.id,
             scope,
-            raw: object.representation.is_raw(),
-            object,
+            raw: item.kind.is_raw(),
+            item,
             tokens,
             born_turn: turn,
             last_used_turn: None,
@@ -193,9 +188,9 @@ impl<Data> ContextHeapSpace<Data> {
         self.entries.values()
     }
 
-    pub(crate) fn insert(&mut self, entry: ZoneEntry<Data>) -> Result<(), ZoneEntry<Data>> {
+    pub(crate) fn insert(&mut self, entry: ZoneEntry<Data>) -> Result<(), Box<ZoneEntry<Data>>> {
         if self.entries.contains_key(&entry.id) {
-            return Err(entry);
+            return Err(Box::new(entry));
         }
         self.usage.add(&entry);
         if let Some(block) = self

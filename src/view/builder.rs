@@ -4,7 +4,7 @@ use std::sync::Arc;
 use thiserror::Error;
 
 use crate::cold::{CatalogLocation, ColdBacking};
-use crate::context::{ContextId, ContextObject, ScopeId};
+use crate::context::{ContextId, ContextItem, InfoKind, ScopeId};
 use crate::heap::ZoneKind;
 use crate::token::TokenCounter;
 use crate::view::{ColdScopeSummaryView, ColdScopeView, ContextView, ContextViewItem, TokenSpace};
@@ -30,7 +30,7 @@ struct PlannedItem<Data> {
     revision: u64,
     scope: ScopeId,
     zone: Option<ZoneKind>,
-    resident: Option<ContextObject<Data>>,
+    resident: Option<ContextItem<Data>>,
 }
 
 pub(crate) struct ViewPlan<Data> {
@@ -76,9 +76,9 @@ where
                     (
                         entry.scope,
                         Some(zone),
-                        Some(entry.object.clone()),
+                        Some(entry.item.clone()),
                         entry.tokens,
-                        entry.object.revision,
+                        entry.item.revision,
                     )
                 } else {
                     let entry = catalog.get(*id).ok_or(ViewError::UnknownContext(*id))?;
@@ -102,6 +102,20 @@ where
             used_tokens += tokens;
         }
         let current = scopes.current();
+        let refined_sources: BTreeSet<_> = [
+            ZoneKind::Eden,
+            ZoneKind::Survivor,
+            ZoneKind::Mature,
+            ZoneKind::Cooling,
+        ]
+        .into_iter()
+        .flat_map(|zone| heap.zone(zone).entries())
+        .filter_map(|entry| match &entry.item.kind {
+            InfoKind::Info(info) => Some(info.sources.iter().map(|span| span.raw)),
+            InfoKind::Raw(_) => None,
+        })
+        .flatten()
+        .collect();
         let mut candidates = Vec::new();
         for zone in [
             ZoneKind::Eden,
@@ -111,7 +125,15 @@ where
         ] {
             for entry in heap.zone(zone).entries() {
                 if entry.scope == current || entry.last_used_turn == Some(turn) {
-                    let priority = if entry.scope == current { 0 } else { 1 };
+                    let priority = if entry.last_used_turn == Some(turn) {
+                        0
+                    } else if matches!(entry.item.kind, InfoKind::Info(_)) {
+                        1
+                    } else if !refined_sources.contains(&entry.id) {
+                        2
+                    } else {
+                        3
+                    };
                     candidates.push((priority, zone, entry.id, entry.tokens));
                 }
             }
@@ -124,10 +146,10 @@ where
             let entry = heap.zone(zone).get(id).expect("listed entry exists");
             items.push(PlannedItem {
                 id,
-                revision: entry.object.revision,
+                revision: entry.item.revision,
                 scope: entry.scope,
                 zone: Some(zone),
-                resident: Some(entry.object.clone()),
+                resident: Some(entry.item.clone()),
             });
             used_tokens += tokens;
         }
@@ -144,15 +166,15 @@ where
             )
         });
         let mut cold_scopes = Vec::new();
-        for (scope, object_count) in scope_counts {
-            let header = format!("scope:{} objects:{}", scope.0, object_count);
+        for (scope, info_count) in scope_counts {
+            let header = format!("scope:{} infos:{}", scope.0, info_count);
             let header_tokens = self.counter.count(&header);
             if used_tokens.saturating_add(header_tokens) > budget.0 {
                 continue;
             }
             let mut scope_view = ColdScopeView {
                 scope,
-                object_count,
+                info_count,
                 summaries: Vec::new(),
             };
             used_tokens += header_tokens;
@@ -170,7 +192,7 @@ where
                 scope_view.summaries.push(ColdScopeSummaryView {
                     content: summary.content.clone(),
                     references: summary.references.clone(),
-                    covered_objects: summary.coverage.len(),
+                    covered_infos: summary.coverage.len(),
                 });
                 used_tokens += tokens;
             }
@@ -187,23 +209,23 @@ where
         let backing = Arc::clone(&self.backing);
         tokio::task::spawn_blocking(move || {
             let mut items = Vec::with_capacity(plan.items.len());
-            for item in plan.items {
-                let object = match item.resident {
-                    Some(object) => object,
+            for planned in plan.items {
+                let loaded = match planned.resident {
+                    Some(item) => item,
                     None => backing
-                        .load(item.id)
+                        .load(planned.id)
                         .map_err(ViewError::ColdBacking)?
-                        .ok_or(ViewError::Invariant("backing lost cataloged object"))?,
+                        .ok_or(ViewError::Invariant("backing lost cataloged info"))?,
                 };
-                if object.id != item.id || object.revision != item.revision {
+                if loaded.id != planned.id || loaded.revision != planned.revision {
                     return Err(ViewError::Invariant(
                         "backing returned wrong identity or revision",
                     ));
                 }
                 items.push(ContextViewItem {
-                    scope: item.scope,
-                    zone: item.zone,
-                    object: object.without_user_data(),
+                    scope: planned.scope,
+                    zone: planned.zone,
+                    item: loaded.without_user_data(),
                 });
             }
             Ok(ContextView {

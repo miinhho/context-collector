@@ -1,4 +1,4 @@
-use crate::context::{ContextId, ContextObject, ScopeId};
+use crate::context::{ContextId, ContextItem, ScopeId};
 use crate::heap::ZoneKind;
 
 mod builder;
@@ -12,20 +12,20 @@ pub struct TokenSpace(pub usize);
 pub struct ContextViewItem {
     pub scope: ScopeId,
     pub zone: Option<ZoneKind>,
-    pub object: ContextObject,
+    pub item: ContextItem,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ColdScopeSummaryView {
     pub content: String,
     pub references: Vec<ContextId>,
-    pub covered_objects: usize,
+    pub covered_infos: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ColdScopeView {
     pub scope: ScopeId,
-    pub object_count: usize,
+    pub info_count: usize,
     pub summaries: Vec<ColdScopeSummaryView>,
 }
 

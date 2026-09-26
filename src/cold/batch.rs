@@ -1,11 +1,11 @@
-use crate::context::{ContextObject, ScopeId};
+use crate::context::{ContextItem, ScopeId};
 use crate::error::ExternalError;
 
 use super::backing::ColdBacking;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BackingRecord<Data = ()> {
-    pub object: ContextObject<Data>,
+    pub item: ContextItem<Data>,
     pub scope: ScopeId,
     pub tokens: usize,
 }
@@ -30,7 +30,7 @@ impl<Data: Clone + PartialEq> ColdCompactionBatch<Data> {
         backing: &dyn ColdBacking<Data>,
     ) -> Result<VerifiedColdCompactionBatch<Data>, ExternalError> {
         for record in &self.records {
-            if backing.load(record.object.id)? != Some(record.object.clone()) {
+            if backing.load(record.item.id)? != Some(record.item.clone()) {
                 return Err(std::sync::Arc::new(std::io::Error::other(
                     "stored payload failed exact reload check",
                 )));

@@ -1,9 +1,9 @@
-use crate::context::{ContextId, ContextObject, ScopeId};
+use crate::context::{ContextId, ContextItem, ScopeId};
 use crate::error::TaskFuture;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ScopeSummaryInput<Data = ()> {
-    pub object: ContextObject<Data>,
+    pub info: ContextItem<Data>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

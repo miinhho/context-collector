@@ -1,5 +1,7 @@
 use crate::context::{ContextId, ContextObject, ScopeId, SourceSpan};
 use crate::heap::{ContextHeap, ZoneKind};
+use std::future::Future;
+use std::pin::Pin;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RawInput {
@@ -15,15 +17,21 @@ pub struct StructuredProposal {
 }
 
 pub trait Objectizer: Send + Sync {
-    fn extract(&self, inputs: &[RawInput]) -> Result<Vec<StructuredProposal>, String>;
+    fn extract<'a>(
+        &'a self,
+        inputs: &'a [RawInput],
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<StructuredProposal>, String>> + Send + 'a>>;
 }
 
 #[derive(Default)]
 pub struct NoopObjectizer;
 
 impl Objectizer for NoopObjectizer {
-    fn extract(&self, _inputs: &[RawInput]) -> Result<Vec<StructuredProposal>, String> {
-        Ok(Vec::new())
+    fn extract<'a>(
+        &'a self,
+        _inputs: &'a [RawInput],
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<StructuredProposal>, String>> + Send + 'a>> {
+        Box::pin(async { Ok(Vec::new()) })
     }
 }
 

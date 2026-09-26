@@ -45,10 +45,16 @@ pub(crate) fn cooling_candidates(
     ids
 }
 
-pub struct CollectionManager;
+pub struct CollectionManager {
+    hot_high: usize,
+}
 
 impl CollectionManager {
-    pub(crate) fn move_entry(
+    pub fn new(hot_high: usize) -> Self {
+        Self { hot_high }
+    }
+
+    fn move_entry(
         heap: &mut ContextHeap,
         id: ContextId,
         source: ZoneKind,
@@ -74,6 +80,7 @@ impl CollectionManager {
     }
 
     pub(crate) fn minor(
+        &self,
         heap: &mut ContextHeap,
         source: ZoneKind,
         turn: u64,
@@ -98,19 +105,19 @@ impl CollectionManager {
     }
 
     pub(crate) fn cooling(
+        &self,
         heap: &mut ContextHeap,
         scopes: &Scopes,
         source: ZoneKind,
         turn: u64,
-        hot_high: usize,
     ) -> Result<Vec<ContextId>, &'static str> {
-        if !heap.zone(source).above_high() && heap.hot_usage() < hot_high {
+        if !heap.zone(source).above_high() && heap.hot_usage() < self.hot_high {
             return Ok(Vec::new());
         }
         let mut moved = Vec::new();
         for id in cooling_candidates(heap, scopes, source, turn) {
             if heap.zone(source).usage().total() <= heap.zone(source).watermark().low
-                && heap.hot_usage() < hot_high
+                && heap.hot_usage() < self.hot_high
             {
                 break;
             }
@@ -120,11 +127,8 @@ impl CollectionManager {
         Ok(moved)
     }
 
-    pub(crate) fn major(
-        heap: &mut ContextHeap,
-        hot_high: usize,
-    ) -> Result<Vec<ContextId>, &'static str> {
-        if !heap.zone(ZoneKind::Cooling).above_high() && heap.hot_usage() < hot_high {
+    pub(crate) fn major(&self, heap: &mut ContextHeap) -> Result<Vec<ContextId>, &'static str> {
+        if !heap.zone(ZoneKind::Cooling).above_high() && heap.hot_usage() < self.hot_high {
             return Ok(Vec::new());
         }
         let ids: Vec<_> = heap
@@ -137,7 +141,7 @@ impl CollectionManager {
         for id in ids {
             if heap.zone(ZoneKind::Cooling).usage().total()
                 <= heap.zone(ZoneKind::Cooling).watermark().low
-                && heap.hot_usage() < hot_high
+                && heap.hot_usage() < self.hot_high
             {
                 break;
             }

@@ -1,4 +1,6 @@
 use crate::context::{ContextId, ContextObject, ScopeId};
+use std::future::Future;
+use std::pin::Pin;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ScopeSummaryInput {
@@ -12,22 +14,23 @@ pub struct ScopeSummaryProposal {
 }
 
 pub trait ScopeSummarizer: Send + Sync {
-    fn summarize(
-        &self,
+    fn summarize<'a>(
+        &'a self,
         scope: ScopeId,
-        inputs: &[ScopeSummaryInput],
-    ) -> Result<Option<ScopeSummaryProposal>, String>;
+        inputs: &'a [ScopeSummaryInput],
+    ) -> Pin<Box<dyn Future<Output = Result<Option<ScopeSummaryProposal>, String>> + Send + 'a>>;
 }
 
 #[derive(Default)]
 pub struct NoopScopeSummarizer;
 
 impl ScopeSummarizer for NoopScopeSummarizer {
-    fn summarize(
-        &self,
+    fn summarize<'a>(
+        &'a self,
         _scope: ScopeId,
-        _inputs: &[ScopeSummaryInput],
-    ) -> Result<Option<ScopeSummaryProposal>, String> {
-        Ok(None)
+        _inputs: &'a [ScopeSummaryInput],
+    ) -> Pin<Box<dyn Future<Output = Result<Option<ScopeSummaryProposal>, String>> + Send + 'a>>
+    {
+        Box::pin(async { Ok(None) })
     }
 }

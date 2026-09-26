@@ -10,7 +10,7 @@ ContextCollector는 장기 실행 Agent의 작업 Context를 관리한다.
 ContextCollector는 Memory 가치나 identity를 결정하지 않는다. 임베딩 검색,
 의미 관계 추론, 일반적인 도구 결과 저장은 코어 도메인의 책임이 아니다.
 
-하나의 정보에는 독립적인 세 관점이 있다.
+Lifecycle의 `ContextItem`에는 독립적인 세 관점이 있다.
 
 | 관점 | 의미 |
 | --- | --- |
@@ -25,33 +25,42 @@ Memory 가치가 생기지 않으며, Info가 생겨도 원본 RawInfo가 소멸
 
 ```text
 ContextHeap
+  ├─ PinnedZone → PinnedEntry들(호출자가 작성한 고정 전달 내용)
   ├─ EdenZone
   ├─ SurvivorZone
   ├─ MatureZone
   ├─ CoolingZone
   └─ ColdZone
-각 Zone: ContextHeapSpace 공통 기반
+Eden부터 Cold까지: ContextHeapSpace 공통 기반
   └─ ScopeBlock들 → ContextItem들(RawInfo / Info)
 
-Scope: Zone들을 가로지르는 정보의 논리적 소속
+Scope: lifecycle Zone들을 가로지르는 ContextItem의 논리적 소속
 ColdCatalog: Cold 정보의 위치, 처리 상태, Scope 요약과 근거 범위
 ColdBacking: Heap 바깥의 보관·재호출 경계
 
-Zone 점유와 turn 관측 → CollectionScheduler
+Lifecycle Zone 점유와 turn 관측 → CollectionScheduler
   ├─ Collection: Zone 사이의 이동
   ├─ Refinement: RawInfo에서 Info 가공
   ├─ Cold Scope 요약
   └─ ColdCompactor: ColdZone → ColdBacking
 ```
 
-`ContextHeap`은 다섯 Zone을 묶는 런타임 작업공간이다. Zone별 정책과 가공
-판단을 중앙에서 소유하지 않는다. `ContextHeapSpace`는 각 Zone의 공통 기반이다.
-Zone은 배치된 정보를 보관·조회하고 Scope별 묶음과 RawInfo·Info의 token 점유를
-계측한다. Watermark 압력을 알리지만 Collection이나 Compaction을 직접 실행하지
-않는다. Backing으로 내보낸 정보는 어느 Zone에도 남지 않는다.
+`ContextHeap`은 PinnedZone과 다섯 lifecycle Zone을 묶는 런타임 작업공간이다.
+Zone별 정책과 가공 판단을 중앙에서 소유하지 않는다. `ContextHeapSpace`는
+다섯 lifecycle Zone의 공통 기반이다. Lifecycle Zone은 배치된 정보를
+보관·조회하고 Scope별 묶음과 RawInfo·Info의 token 점유를 계측한다.
+Watermark 압력을 알리지만 Collection이나 Compaction을 직접 실행하지 않는다.
+Backing으로 내보낸 정보는 어느 Zone에도 남지 않는다.
+
+`PinnedZone`은 lifecycle 경로 밖에 있는 Heap 공간이다. 호출자가 넣은
+`PinnedEntry`의 내용과 삽입 순서, token 점유를 보관한다. PinnedEntry는
+RawInfo·Info의 가공 결과인 `ContextItem`이 아니며 ScopeBlock에도 속하지
+않는다. Runtime은 PinnedEntry의 내용을 자동으로 변경하거나 Zone 사이에서
+이동시키지 않는다. 호출자가 명시적으로 추가·제거할 수 있다. PinnedZone에는
+Collection용 watermark 대신 삽입 시 확인하는 token 용량이 있다.
 
 `Scope`는 논리적 작업의 소유 경계다. 한 Scope의 정보는 여러 Zone에 걸칠 수
-있고, 다른 Scope에서 참조해도 원래 소속은 바뀌지 않는다. 각 Zone의
+있고, 다른 Scope에서 참조해도 원래 소속은 바뀌지 않는다. 각 lifecycle Zone의
 `ScopeBlock`은 같은 Scope의 정보를 인접하게 탐색하는 내부 구조다. 한 Scope가
 한 Zone에 여러 Block을 가질 수 있으며, Block은 독립된 소유권·lifecycle·
 영속적 identity·원자적 이동 단위가 아니다.
@@ -81,6 +90,7 @@ Info에는 표시할 내용, RawInfo의 근거와 revision, 사용자 정의 타
 ## Lifecycle과 Agent 관측
 
 ```text
+PinnedZone: Heap에 상주, 모든 View에 포함, lifecycle 이동 없음
 Eden → Survivor → Mature → Cooling → Cold → ColdBacking
 |---------------- Hot ----------------|
 ```
@@ -114,6 +124,9 @@ Agent는 메시지와 함께 turn 단위의 `uses`와 `scope`를 보고한다. R
 ### Agent에게 전달하는 Context
 
 View는 Runtime의 Zone·정보 형태·Scope 항목을 그대로 나열하지 않는다.
+PinnedZone의 내용은 매 View에 삽입 순서대로 포함하며, 호출자가 작성한 텍스트에
+ViewNote나 대화 형식을 덧씌우지 않는다. Pinned의 내용과 동적 Context를
+합친 최종 표현을 token 계측한다.
 선정된 원본 대화 메시지는 역할과 turn 순서를 지켜 전달하고, 관찰 뒤 얻은 Info와
 Cold 부분의 Scope 요약은 이전 대화를 이어주는 Markdown 내용으로 제공한다.
 표시된 정보와 근거에는 `#ID` 참조를 붙여 정확한 원본을 다시 읽을 수 있게 한다.
@@ -129,7 +142,7 @@ Cold와 Backing에 있는 정보의 `uses`도 ColdCatalog에 관측으로 기록
 정보의 token 점유와 압력은 Heap의 Zone별 watermark와
 Collection·Compaction이 관리한다. View는 별도의 예산으로 Hot 내용을
 제외하거나 저장 상태를 바꾸지 않는다.
-각 Zone의 정보가 기본 View에서 차지하는 내용은 대응하는 View section에서
+각 lifecycle Zone의 정보가 기본 View에서 차지하는 내용은 대응하는 View section에서
 계산한다. 선택된 Info가 RawInfo를 참조하면 기본 View에는 Info와 원문 참조를
 두고, 정확한 RawInfo 본문은 조회할 때 읽는다. Section의 token 점유는 실제
 Markdown 표현으로 계측하며 같은 시점의 Zone 점유와 watermark를 함께 볼 수
@@ -144,7 +157,8 @@ Markdown으로 표현하며, 원본 내용과 사용자 정의 데이터의 정�
 
 ## Watermark와 실행 책임
 
-각 Zone은 RawInfo와 Info를 합한 token 점유와 `high`·`low` watermark를 가진다.
+각 lifecycle Zone은 RawInfo와 Info를 합한 token 점유와 `high`·`low`
+watermark를 가진다.
 형태별 점유도 계측한다. `high`는 작업을 검토하는 신호이고 `low`는 안전한
 후보가 있을 때의 목표다. Scheduler는 Zone 점유와 관측 상태로 작업을 예약한다.
 고정된 turn 번호나 Scope 전환만으로 이동하지 않는다. Hot 내부 이동은 Hot 전체

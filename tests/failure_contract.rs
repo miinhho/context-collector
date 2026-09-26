@@ -27,6 +27,7 @@ impl TokenCounter for Bytes {
 fn config() -> RuntimeConfig {
     RuntimeConfig {
         watermarks: [Watermark { low: 1, high: 4 }; 5],
+        pinned_capacity: 0,
         hot_high: 100,
         processing_batch_tokens: 1024,
         max_processing_failures: 3,

@@ -10,7 +10,7 @@ use crate::compaction::scope_summary::ScopeSummarizer;
 use crate::compaction::{RefinementError, RefinementManager};
 use crate::context::{ContextItem, InfoKind};
 use crate::error::ExternalError;
-use crate::heap::{TokenUsage, ZoneKind};
+use crate::heap::{PinnedEntry, PinnedError, PinnedId, TokenUsage, ZoneKind};
 use crate::token::{TiktokenCounter, TokenCounter};
 use crate::view::{ContextView, ViewBuilder, ViewError, ViewUsage, lookup};
 use serde::{Deserialize, Serialize};
@@ -44,6 +44,8 @@ pub struct TurnObservation {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RuntimeConfig {
     pub watermarks: [Watermark; 5],
+    /// Admission limit for immutable, always-visible Pinned content; zero disables it.
+    pub pinned_capacity: usize,
     pub hot_high: usize,
     pub processing_batch_tokens: usize,
     pub max_processing_failures: u32,
@@ -76,6 +78,8 @@ pub enum RuntimeError {
     View(#[from] ViewError),
     #[error(transparent)]
     Collection(#[from] CollectionError),
+    #[error(transparent)]
+    Pinned(#[from] PinnedError),
     #[error("Cold backing failed")]
     ColdBacking(#[source] ExternalError),
     #[error("maintenance worker failed")]
@@ -116,7 +120,8 @@ impl<Data, SummaryData> RuntimeState<Data, SummaryData> {
         }
         Ok(Self {
             config,
-            heap: ContextHeap::new(config.watermarks).ok_or(RuntimeError::InvalidConfig)?,
+            heap: ContextHeap::new(config.watermarks, config.pinned_capacity)
+                .ok_or(RuntimeError::InvalidConfig)?,
             scopes: Scopes::default(),
             catalog: ColdCatalog::default(),
             scheduler: CollectionScheduler::default(),
@@ -143,6 +148,7 @@ pub struct Runtime<Data = (), SummaryData = ()> {
     view: Arc<ViewBuilder<Data>>,
     maintenance: Arc<MaintenanceRunner<Data, SummaryData>>,
     backing: Arc<dyn ColdBacking<Data>>,
+    counter: Arc<dyn TokenCounter>,
 }
 
 impl<Data, SummaryData> Runtime<Data, SummaryData>
@@ -192,7 +198,30 @@ where
             view,
             maintenance,
             backing,
+            counter,
         })
+    }
+
+    /// Include caller-authored text verbatim in every View until explicitly removed.
+    pub async fn pin(&self, content: String) -> Result<PinnedId, RuntimeError> {
+        let counter = Arc::clone(&self.counter);
+        let (content, tokens) = tokio::task::spawn_blocking(move || {
+            let tokens = counter.count(&content);
+            (content, tokens)
+        })
+        .await
+        .map_err(|error| RuntimeError::Worker(Arc::new(error)))?;
+        let mut state = self.state.lock().await;
+        Ok(state.heap.pinned_mut().insert(content, tokens)?)
+    }
+
+    pub async fn unpin(&self, id: PinnedId) -> Result<(), RuntimeError> {
+        let mut state = self.state.lock().await;
+        Ok(state.heap.pinned_mut().remove(id)?)
+    }
+
+    pub async fn pinned_entries(&self) -> Vec<PinnedEntry> {
+        self.state.lock().await.heap.pinned().entries().to_vec()
     }
 
     pub async fn complete_turn(

@@ -7,7 +7,7 @@ pub(crate) mod lookup;
 mod space;
 pub(crate) use builder::ViewBuilder;
 pub use builder::ViewError;
-pub use space::{ViewSectionUsage, ViewUsage};
+pub use space::{PinnedViewUsage, ViewSectionUsage, ViewUsage};
 
 /// A turn message retained with its original speaker and order.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -32,6 +32,8 @@ pub struct ViewNote {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ContextView {
+    /// Caller-authored fragments, preserved verbatim and ordered before dynamic context.
+    pub pinned: Vec<String>,
     pub notes: Vec<ViewNote>,
     pub messages: Vec<ViewMessage>,
     /// Delivery measurement from the same renderer used for this View.
@@ -93,7 +95,15 @@ impl ContextView {
                 ));
             }
         }
-        output
+        if self.pinned.is_empty() {
+            return output;
+        }
+        let mut pinned = self.pinned.join("\n\n");
+        if !output.is_empty() {
+            pinned.push_str("\n\n");
+            pinned.push_str(&output);
+        }
+        pinned
     }
 }
 

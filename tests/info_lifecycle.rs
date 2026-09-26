@@ -28,6 +28,7 @@ fn config(cold_high: usize) -> RuntimeConfig {
     };
     RuntimeConfig {
         watermarks,
+        pinned_capacity: 0,
         hot_high: 100,
         processing_batch_tokens: 1024,
         max_processing_failures: 2,

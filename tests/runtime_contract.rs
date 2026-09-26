@@ -70,6 +70,7 @@ impl ScopeSummarizer for FixedSummary {
 fn config() -> RuntimeConfig {
     RuntimeConfig {
         watermarks: [Watermark { low: 1, high: 4 }; 5],
+        pinned_capacity: 0,
         hot_high: 100,
         processing_batch_tokens: 1024,
         max_processing_failures: 3,
@@ -318,6 +319,7 @@ async fn synthetic_scope_report_sequences_preserve_turn_assignment_and_raw() {
                 let runtime = Runtime::with_counter(
                     RuntimeConfig {
                         watermarks: [Watermark { low: 1, high: 1000 }; 5],
+                        pinned_capacity: 0,
                         hot_high: 10_000,
                         processing_batch_tokens: 1024,
                         max_processing_failures: 3,

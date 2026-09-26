@@ -110,6 +110,7 @@ async fn user_data_survives_refinement_cold_backing_and_catalog_retrieval() {
     let runtime = Runtime::<FactData, SummaryData>::with_counter(
         RuntimeConfig {
             watermarks: [Watermark { low: 1, high: 4 }; 5],
+            pinned_capacity: 0,
             hot_high: 100,
             processing_batch_tokens: 1024,
             max_processing_failures: 3,
@@ -239,6 +240,7 @@ async fn changed_user_data_fails_exact_reload_before_cold_removal() {
     let runtime = Runtime::<FactData, SummaryData>::with_counter(
         RuntimeConfig {
             watermarks: [Watermark { low: 1, high: 4 }; 5],
+            pinned_capacity: 0,
             hot_high: 100,
             processing_batch_tokens: 1024,
             max_processing_failures: 3,
@@ -331,6 +333,7 @@ async fn task_failure_retains_application_error_as_source() {
     let runtime = Runtime::<FactData, SummaryData>::with_counter(
         RuntimeConfig {
             watermarks: [Watermark { low: 1, high: 4 }; 5],
+            pinned_capacity: 0,
             hot_high: 100,
             processing_batch_tokens: 1024,
             max_processing_failures: 3,
@@ -404,6 +407,7 @@ async fn changing_user_metadata_does_not_duplicate_the_same_grounded_info() {
     let runtime = Runtime::<FactData, SummaryData>::with_counter(
         RuntimeConfig {
             watermarks: [Watermark { low: 1, high: 4 }; 5],
+            pinned_capacity: 0,
             hot_high: 100,
             processing_batch_tokens: 1024,
             max_processing_failures: 3,

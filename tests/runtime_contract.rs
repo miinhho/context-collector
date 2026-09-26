@@ -4,16 +4,15 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use context_collector::cold::{CatalogLocation, ColdBacking};
-use context_collector::compaction::objectization::{
-    ObjectizationInput, Objectizer, StructuredProposal,
+use context_collector::compaction::refinement::{
+    InfoDraft, InfoRefiner, RefinementInput, RefinementResult,
 };
 use context_collector::compaction::scope_summary::{
     ScopeSummarizer, ScopeSummaryInput, ScopeSummaryProposal,
 };
 use context_collector::{
-    ContextId, InMemoryColdBacking, NoopObjectizer, Representation, Runtime, RuntimeConfig,
-    ScopeId, ScopeReport, SourceSpan, TokenCounter, TokenSpace, TurnObservation, Watermark,
-    ZoneKind,
+    ContextId, InMemoryColdBacking, InfoKind, NoopInfoRefiner, Runtime, RuntimeConfig, ScopeId,
+    ScopeReport, SourceSpan, TokenCounter, TurnObservation, Watermark, ZoneKind,
 };
 
 struct Bytes;
@@ -24,17 +23,16 @@ impl TokenCounter for Bytes {
 }
 
 struct FirstSpan;
-impl Objectizer for FirstSpan {
-    fn extract<'a>(
+impl InfoRefiner for FirstSpan {
+    fn refine<'a>(
         &'a self,
-        input: ObjectizationInput<'a>,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<StructuredProposal>, ExternalError>> + Send + 'a>>
-    {
+        input: RefinementInput<'a>,
+    ) -> Pin<Box<dyn Future<Output = Result<RefinementResult, ExternalError>> + Send + 'a>> {
         Box::pin(async move {
             let Some(first) = input.raw.iter().find(|input| !input.content.is_empty()) else {
-                return Ok(Vec::new());
+                return Ok(Vec::new().into());
             };
-            Ok(vec![StructuredProposal {
+            Ok(vec![InfoDraft {
                 content: "fact".into(),
                 data: (),
                 sources: vec![SourceSpan {
@@ -43,7 +41,8 @@ impl Objectizer for FirstSpan {
                     start: 0,
                     end: first.content.chars().next().unwrap().len_utf8(),
                 }],
-            }])
+            }]
+            .into())
         })
     }
 }
@@ -60,8 +59,8 @@ impl ScopeSummarizer for FixedSummary {
         Box::pin(async move {
             Ok(Some(ScopeSummaryProposal {
                 content: "opaque scope summary".into(),
-                references: inputs.iter().map(|item| item.object.id).collect(),
-                covered: inputs.iter().map(|item| item.object.id).collect(),
+                references: inputs.iter().map(|item| item.info.id).collect(),
+                covered: inputs.iter().map(|item| item.info.id).collect(),
                 data: (),
             }))
         })
@@ -72,15 +71,17 @@ fn config() -> RuntimeConfig {
     RuntimeConfig {
         watermarks: [Watermark { low: 1, high: 4 }; 5],
         hot_high: 100,
+        processing_batch_tokens: 1024,
+        max_processing_failures: 3,
     }
 }
 
 fn runtime(
-    objectizer: Arc<dyn Objectizer>,
+    refiner: Arc<dyn InfoRefiner>,
     summarizer: Arc<dyn ScopeSummarizer>,
     backing: Arc<dyn ColdBacking>,
 ) -> Runtime {
-    Runtime::with_counter(config(), Arc::new(Bytes), objectizer, summarizer, backing).unwrap()
+    Runtime::with_counter(config(), Arc::new(Bytes), refiner, summarizer, backing).unwrap()
 }
 
 async fn settle(runtime: &Runtime) {
@@ -91,7 +92,7 @@ async fn settle(runtime: &Runtime) {
 #[tokio::test]
 async fn turn_reports_assign_scope_without_changing_prior_ownership() {
     let runtime = runtime(
-        Arc::new(NoopObjectizer),
+        Arc::new(NoopInfoRefiner),
         Arc::new(FixedSummary),
         Arc::new(InMemoryColdBacking::default()),
     );
@@ -115,22 +116,12 @@ async fn turn_reports_assign_scope_without_changing_prior_ownership() {
     assert_ne!(first.scope, second.scope);
     assert_eq!(runtime.current_scope().await, second.scope);
     assert_eq!(
-        runtime
-            .read(first.user)
-            .await
-            .unwrap()
-            .unwrap()
-            .representation,
-        Representation::Raw("user".into())
+        runtime.read(first.user).await.unwrap().unwrap().kind,
+        InfoKind::Raw("user".into())
     );
     assert_eq!(
-        runtime
-            .read(second.user)
-            .await
-            .unwrap()
-            .unwrap()
-            .representation,
-        Representation::Raw("new".into())
+        runtime.read(second.user).await.unwrap().unwrap().kind,
+        InfoKind::Raw("new".into())
     );
     runtime.select_scope(first.scope).await.unwrap();
     assert_eq!(runtime.current_scope().await, first.scope);
@@ -149,7 +140,7 @@ async fn turn_reports_assign_scope_without_changing_prior_ownership() {
 }
 
 #[tokio::test]
-async fn structured_extraction_keeps_raw_exact_and_tracks_both_token_kinds() {
+async fn info_refinement_keeps_raw_exact_and_tracks_both_token_kinds() {
     let runtime = runtime(
         Arc::new(FirstSpan),
         Arc::new(FixedSummary),
@@ -166,32 +157,63 @@ async fn structured_extraction_keeps_raw_exact_and_tracks_both_token_kinds() {
         .unwrap();
     settle(&runtime).await;
     let original = runtime.read(first.user).await.unwrap().unwrap();
-    assert_eq!(original.representation, Representation::Raw("αbc".into()));
-    let view = runtime.context_view(TokenSpace(300), &[]).await.unwrap();
+    assert_eq!(original.kind, InfoKind::Raw("αbc".into()));
+    let view = runtime.context_view(&[]).await.unwrap();
     let extracted: Vec<_> = view
-        .items
+        .notes
         .iter()
-        .filter(|item| match &item.object.representation {
-            Representation::Structured { sources, .. } => {
-                sources.iter().any(|source| source.raw == first.user)
-            }
-            _ => false,
-        })
+        .filter(|note| note.sources.contains(&first.user))
         .collect();
     assert!(!extracted.is_empty());
-    assert!(extracted.iter().all(|item| item.scope == first.scope));
-    for item in extracted {
-        assert!(item.zone.is_some());
-        let usage = runtime.zone_usage(item.zone.unwrap()).await;
-        assert!(usage.raw > 0 && usage.structured > 0);
+    assert!(extracted.iter().all(|note| note.scope == first.scope));
+    assert!(!view.messages.iter().any(|message| message.id == first.user));
+    assert_eq!(view.usage.total, view.markdown().len());
+    for note in extracted {
+        let zone = runtime.zone_of(note.id.unwrap()).await.unwrap();
+        let usage = runtime.zone_usage(zone).await;
+        assert!(usage.raw > 0 && usage.info > 0);
+        assert!(view.usage.section(zone).unwrap().rendered_tokens > 0);
     }
+}
+
+#[tokio::test]
+async fn refined_info_replaces_raw_body_only_in_the_view_section() {
+    let runtime = runtime(
+        Arc::new(FirstSpan),
+        Arc::new(FixedSummary),
+        Arc::new(InMemoryColdBacking::default()),
+    );
+    let raw = "x".repeat(400);
+    let first = runtime
+        .complete_turn(raw.clone(), "a".into(), TurnObservation::default())
+        .await
+        .unwrap();
+    settle(&runtime).await;
+    runtime
+        .complete_turn("b".into(), "c".into(), TurnObservation::default())
+        .await
+        .unwrap();
+    settle(&runtime).await;
+
+    let view = runtime.context_view(&[]).await.unwrap();
+    assert!(
+        view.notes
+            .iter()
+            .any(|note| note.sources.contains(&first.user))
+    );
+    assert!(!view.messages.iter().any(|message| message.id == first.user));
+    assert!(view.usage.total < raw.len());
+    assert_eq!(
+        runtime.read(first.user).await.unwrap().unwrap().kind,
+        InfoKind::Raw(raw.into())
+    );
 }
 
 #[tokio::test]
 async fn cold_catalog_and_backing_preserve_exact_raw_and_scoped_summary() {
     let backing = Arc::new(InMemoryColdBacking::default());
     let runtime = runtime(
-        Arc::new(NoopObjectizer),
+        Arc::new(NoopInfoRefiner),
         Arc::new(FixedSummary),
         backing.clone(),
     );
@@ -239,46 +261,28 @@ async fn cold_catalog_and_backing_preserve_exact_raw_and_scoped_summary() {
     );
     assert_eq!(runtime.zone_of(first.user).await, None);
     assert_eq!(
-        runtime
-            .read(first.user)
-            .await
-            .unwrap()
-            .unwrap()
-            .representation,
-        Representation::Raw("source payload".into())
+        runtime.read(first.user).await.unwrap().unwrap().kind,
+        InfoKind::Raw("source payload".into())
     );
     assert_eq!(
-        backing.load(first.user).unwrap().unwrap().representation,
-        Representation::Raw("source payload".into())
+        backing.load(first.user).unwrap().unwrap().kind,
+        InfoKind::Raw("source payload".into())
     );
-    let view = runtime
-        .context_view(TokenSpace(500), &[first.user])
-        .await
-        .unwrap();
+    runtime.select_scope(first.scope).await.unwrap();
+    let view = runtime.context_view(&[first.user]).await.unwrap();
+    assert!(view.notes.iter().any(|note| note.id == Some(first.user)));
     assert!(
-        view.items
+        view.notes
             .iter()
-            .any(|item| item.object.id == first.user && item.zone.is_none())
+            .any(|note| note.content == "opaque scope summary"
+                && note.coverage.contains(&first.user))
     );
-    let scope = view
-        .cold_scopes
-        .iter()
-        .find(|entry| entry.scope == first.scope)
-        .unwrap();
-    assert!(
-        scope
-            .summaries
-            .iter()
-            .any(|summary| summary.content == "opaque scope summary"
-                && summary.references.contains(&first.user))
-    );
-    assert!(view.used_tokens <= 500);
 }
 
 #[tokio::test]
 async fn unknown_uses_are_rejected_before_turn_is_recorded() {
     let runtime = runtime(
-        Arc::new(NoopObjectizer),
+        Arc::new(NoopInfoRefiner),
         Arc::new(FixedSummary),
         Arc::new(InMemoryColdBacking::default()),
     );
@@ -315,9 +319,11 @@ async fn synthetic_scope_report_sequences_preserve_turn_assignment_and_raw() {
                     RuntimeConfig {
                         watermarks: [Watermark { low: 1, high: 1000 }; 5],
                         hot_high: 10_000,
+                        processing_batch_tokens: 1024,
+                        max_processing_failures: 3,
                     },
                     Arc::new(Bytes),
-                    Arc::new(NoopObjectizer),
+                    Arc::new(NoopInfoRefiner),
                     Arc::new(FixedSummary),
                     Arc::new(InMemoryColdBacking::default()),
                 )
@@ -351,22 +357,12 @@ async fn synthetic_scope_report_sequences_preserve_turn_assignment_and_raw() {
                         assert_eq!(receipt.scope, previous_scope);
                     }
                     assert_eq!(
-                        runtime
-                            .read(receipt.user)
-                            .await
-                            .unwrap()
-                            .unwrap()
-                            .representation,
-                        Representation::Raw(user)
+                        runtime.read(receipt.user).await.unwrap().unwrap().kind,
+                        InfoKind::Raw(user.into())
                     );
                     assert_eq!(
-                        runtime
-                            .read(receipt.agent)
-                            .await
-                            .unwrap()
-                            .unwrap()
-                            .representation,
-                        Representation::Raw(agent)
+                        runtime.read(receipt.agent).await.unwrap().unwrap().kind,
+                        InfoKind::Raw(agent.into())
                     );
                     previous_scope = receipt.scope;
                     receipts.push(receipt);
@@ -398,9 +394,9 @@ impl ScopeSummarizer for FirstOnlySummary {
     > {
         Box::pin(async move {
             self.input_sizes.lock().unwrap().push(inputs.len());
-            let id = inputs[0].object.id;
+            let id = inputs[0].info.id;
             Ok(Some(ScopeSummaryProposal {
-                content: "first object only".into(),
+                content: "first info only".into(),
                 references: vec![id],
                 covered: vec![id],
                 data: (),
@@ -410,12 +406,12 @@ impl ScopeSummarizer for FirstOnlySummary {
 }
 
 #[tokio::test]
-async fn cold_summary_coverage_tracks_declared_subset_of_selected_objects() {
+async fn cold_summary_coverage_tracks_declared_subset_of_selected_infos() {
     let summarizer = Arc::new(FirstOnlySummary {
         input_sizes: std::sync::Mutex::new(Vec::new()),
     });
     let runtime = runtime(
-        Arc::new(NoopObjectizer),
+        Arc::new(NoopInfoRefiner),
         summarizer.clone(),
         Arc::new(InMemoryColdBacking::default()),
     );

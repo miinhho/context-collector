@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-use crate::context::{ContextId, ScopeId};
+use crate::context::{ContextId, ProcessingState, ScopeId};
 use crate::heap::ZoneEntry;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -17,6 +17,8 @@ pub struct ColdCatalogEntry {
     pub revision: u64,
     pub tokens: usize,
     pub location: CatalogLocation,
+    pub last_used_turn: Option<u64>,
+    pub processing: ProcessingState,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -66,9 +68,11 @@ impl<SummaryData> ColdCatalog<SummaryData> {
             ColdCatalogEntry {
                 id: entry.id,
                 scope: entry.scope,
-                revision: entry.object.revision,
+                revision: entry.item.revision,
                 tokens: entry.tokens,
                 location: CatalogLocation::ColdZone,
+                last_used_turn: entry.last_used_turn,
+                processing: entry.item.processing.clone(),
             },
         );
     }
@@ -78,6 +82,19 @@ impl<SummaryData> ColdCatalog<SummaryData> {
             .get_mut(&id)
             .expect("Cold entry was registered")
             .location = CatalogLocation::Backing;
+    }
+
+    pub(crate) fn update_processing(&mut self, id: ContextId, processing: ProcessingState) {
+        self.entries
+            .get_mut(&id)
+            .expect("Cold entry was registered")
+            .processing = processing;
+    }
+
+    pub(crate) fn record_use(&mut self, id: ContextId, turn: u64) {
+        if let Some(entry) = self.entries.get_mut(&id) {
+            entry.last_used_turn = Some(turn);
+        }
     }
 
     pub(crate) fn add_summary(&mut self, scope: ScopeId, summary: ScopeSummary<SummaryData>) {

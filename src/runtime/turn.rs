@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::context::{ContextId, ContextObject, ScopeId};
+use crate::context::{ContextId, ContextItem, MessageRole, ScopeId};
 use crate::heap::{ZoneEntry, ZoneKind};
 use crate::token::TokenCounter;
 
@@ -35,14 +35,19 @@ impl TurnRecorder {
         } else {
             state.scopes.current()
         };
-        let user_id = self.insert_raw(state, scope, user)?;
-        let agent_id = self.insert_raw(state, scope, agent)?;
+        let user_id = self.insert_raw(state, scope, user, MessageRole::User)?;
+        let agent_id = self.insert_raw(state, scope, agent, MessageRole::Agent)?;
         if let Some(uses) = report.uses {
             for id in uses {
                 if let Some((zone, _)) = state.heap.find(id)
                     && let Some(entry) = state.heap.zone_mut(zone).get_mut(id)
                 {
                     entry.last_used_turn = Some(state.turn);
+                    if zone == ZoneKind::Cold {
+                        state.catalog.record_use(id, state.turn);
+                    }
+                } else if state.catalog.get(id).is_some() {
+                    state.catalog.record_use(id, state.turn);
                 }
             }
         }
@@ -60,14 +65,15 @@ impl TurnRecorder {
         state: &mut RuntimeState<Data, SummaryData>,
         scope: ScopeId,
         content: String,
+        role: MessageRole,
     ) -> Result<ContextId, RuntimeError> {
         let id = state.next_context_id();
         let tokens = self.counter.count(&content);
-        let object = ContextObject::raw(id, content);
+        let item = ContextItem::raw_message(id, content, state.turn, role);
         state
             .heap
             .zone_mut(ZoneKind::Eden)
-            .insert(ZoneEntry::new(object, scope, tokens, state.turn))
+            .insert(ZoneEntry::new(item, scope, tokens, state.turn))
             .map_err(|_| RuntimeError::Invariant("duplicate Eden id"))?;
         if !state.scopes.add(scope, id) {
             return Err(RuntimeError::Invariant("scope membership insertion failed"));

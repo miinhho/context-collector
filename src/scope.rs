@@ -59,17 +59,17 @@ impl Scopes {
         self.items.values()
     }
 
-    pub fn owner_of(&self, object: ContextId) -> Option<ScopeId> {
+    pub fn owner_of(&self, item: ContextId) -> Option<ScopeId> {
         self.items
             .values()
-            .find(|scope| scope.members.contains(&object))
+            .find(|scope| scope.members.contains(&item))
             .map(|scope| scope.id)
     }
 
-    pub(crate) fn add(&mut self, scope: ScopeId, object: ContextId) -> bool {
+    pub(crate) fn add(&mut self, scope: ScopeId, item: ContextId) -> bool {
         self.items
             .get_mut(&scope)
-            .is_some_and(|item| item.members.insert(object))
+            .is_some_and(|scope_state| scope_state.members.insert(item))
     }
 
     pub(crate) fn transition(&mut self, turn: u64) -> ScopeId {

@@ -12,5 +12,5 @@ path = "src/lib.rs"
 serde = { version = "1.0.229", features = ["derive"] }
 thiserror = "2.0.20"
 tracing = "0.1.44"
-tokio = { version = "1.53.1", features = ["rt-multi-thread", "sync", "macros", "time"] }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "sync", "macros", "time", "net", "io-util"] }
 tiktoken-rs = "0.12.1"

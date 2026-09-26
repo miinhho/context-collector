@@ -1,8 +1,27 @@
 use crate::context::ContextId;
 use crate::heap::{ContextHeap, ZoneKind};
 use crate::scope::Scopes;
+use thiserror::Error;
 
-pub(crate) fn minor_candidates(heap: &ContextHeap, zone: ZoneKind, turn: u64) -> Vec<ContextId> {
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
+pub enum CollectionError {
+    #[error("duplicate target context id")]
+    DuplicateTarget,
+    #[error("source context is missing")]
+    MissingSource,
+    #[error("collection rollback failed")]
+    RollbackFailed,
+    #[error("target insertion failed")]
+    TargetInsertionFailed,
+    #[error("invalid Minor source Zone")]
+    InvalidMinorSource,
+}
+
+pub(crate) fn minor_candidates<Data>(
+    heap: &ContextHeap<Data>,
+    zone: ZoneKind,
+    turn: u64,
+) -> Vec<ContextId> {
     heap.zone(zone)
         .entries()
         .filter(|entry| !entry.protected && entry.born_turn < turn)
@@ -10,8 +29,8 @@ pub(crate) fn minor_candidates(heap: &ContextHeap, zone: ZoneKind, turn: u64) ->
         .collect()
 }
 
-pub(crate) fn cooling_candidates(
-    heap: &ContextHeap,
+pub(crate) fn cooling_candidates<Data>(
+    heap: &ContextHeap<Data>,
     scopes: &Scopes,
     zone: ZoneKind,
     turn: u64,
@@ -45,46 +64,53 @@ pub(crate) fn cooling_candidates(
     ids
 }
 
-pub struct CollectionManager;
+pub struct CollectionManager {
+    hot_high: usize,
+}
 
 impl CollectionManager {
-    pub(crate) fn move_entry(
-        heap: &mut ContextHeap,
+    pub fn new(hot_high: usize) -> Self {
+        Self { hot_high }
+    }
+
+    fn move_entry<Data>(
+        heap: &mut ContextHeap<Data>,
         id: ContextId,
         source: ZoneKind,
         target: ZoneKind,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), CollectionError> {
         if heap.zone(target).get(id).is_some() {
-            return Err("duplicate target id");
+            return Err(CollectionError::DuplicateTarget);
         }
         let mut entry = heap
             .zone_mut(source)
             .remove(id)
-            .ok_or("source id missing")?;
+            .ok_or(CollectionError::MissingSource)?;
         entry.collections += 1;
         match heap.zone_mut(target).insert(entry) {
             Ok(()) => Ok(()),
             Err(entry) => {
                 heap.zone_mut(source)
                     .insert(entry)
-                    .map_err(|_| "rollback failed")?;
-                Err("target insertion failed")
+                    .map_err(|_| CollectionError::RollbackFailed)?;
+                Err(CollectionError::TargetInsertionFailed)
             }
         }
     }
 
-    pub(crate) fn minor(
-        heap: &mut ContextHeap,
+    pub(crate) fn minor<Data>(
+        &self,
+        heap: &mut ContextHeap<Data>,
         source: ZoneKind,
         turn: u64,
-    ) -> Result<Vec<ContextId>, &'static str> {
+    ) -> Result<Vec<ContextId>, CollectionError> {
         if !heap.zone(source).above_high() {
             return Ok(Vec::new());
         }
         let target = match source {
             ZoneKind::Eden => ZoneKind::Survivor,
             ZoneKind::Survivor => ZoneKind::Mature,
-            _ => return Err("invalid Minor source"),
+            _ => return Err(CollectionError::InvalidMinorSource),
         };
         let mut moved = Vec::new();
         for id in minor_candidates(heap, source, turn) {
@@ -97,20 +123,20 @@ impl CollectionManager {
         Ok(moved)
     }
 
-    pub(crate) fn cooling(
-        heap: &mut ContextHeap,
+    pub(crate) fn cooling<Data>(
+        &self,
+        heap: &mut ContextHeap<Data>,
         scopes: &Scopes,
         source: ZoneKind,
         turn: u64,
-        hot_high: usize,
-    ) -> Result<Vec<ContextId>, &'static str> {
-        if !heap.zone(source).above_high() && heap.hot_usage() < hot_high {
+    ) -> Result<Vec<ContextId>, CollectionError> {
+        if !heap.zone(source).above_high() && heap.hot_usage() < self.hot_high {
             return Ok(Vec::new());
         }
         let mut moved = Vec::new();
         for id in cooling_candidates(heap, scopes, source, turn) {
             if heap.zone(source).usage().total() <= heap.zone(source).watermark().low
-                && heap.hot_usage() < hot_high
+                && heap.hot_usage() < self.hot_high
             {
                 break;
             }
@@ -120,11 +146,11 @@ impl CollectionManager {
         Ok(moved)
     }
 
-    pub(crate) fn major(
-        heap: &mut ContextHeap,
-        hot_high: usize,
-    ) -> Result<Vec<ContextId>, &'static str> {
-        if !heap.zone(ZoneKind::Cooling).above_high() && heap.hot_usage() < hot_high {
+    pub(crate) fn major<Data>(
+        &self,
+        heap: &mut ContextHeap<Data>,
+    ) -> Result<Vec<ContextId>, CollectionError> {
+        if !heap.zone(ZoneKind::Cooling).above_high() && heap.hot_usage() < self.hot_high {
             return Ok(Vec::new());
         }
         let ids: Vec<_> = heap
@@ -137,7 +163,7 @@ impl CollectionManager {
         for id in ids {
             if heap.zone(ZoneKind::Cooling).usage().total()
                 <= heap.zone(ZoneKind::Cooling).watermark().low
-                && heap.hot_usage() < hot_high
+                && heap.hot_usage() < self.hot_high
             {
                 break;
             }

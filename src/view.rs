@@ -1,6 +1,10 @@
 use crate::context::{ContextId, ContextObject, ScopeId};
 use crate::heap::ZoneKind;
 
+mod builder;
+pub(crate) use builder::ViewBuilder;
+pub use builder::ViewError;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TokenSpace(pub usize);
 

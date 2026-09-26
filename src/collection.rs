@@ -1,5 +1,5 @@
 mod manager;
 mod scheduler;
 
-pub use manager::CollectionManager;
+pub use manager::{CollectionError, CollectionManager};
 pub use scheduler::{CollectionScheduler, Job};

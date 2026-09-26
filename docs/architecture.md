@@ -63,6 +63,8 @@ Scope는 Collection과 Compaction이 후보를 모으는 공통 경계다. Scope
 - `RawObject`는 Runtime이 받아들인 정확한 원본이다. 사용자·Agent의 새 상호작용은 일반적으로 Raw로 Eden에 들어간다. 원본 payload는 compaction이나 Zone 이동으로 잘리거나 덮어써지지 않고 정확히 다시 읽을 수 있다.
 - `StructuredObject`는 충분히 관찰된 Raw에서 추출한, 독립적으로 활용할 수 있는 작업 객체다. 단순한 축약문이 아니며 근거가 된 Raw 부분과 revision을 추적한다.
 
+StructuredObject는 표시할 내용과 Raw 근거 외에 사용자가 정의한 타입의 데이터를 가질 수 있다. Runtime은 이 데이터의 의미를 해석하지 않으며, 객체와 함께 Zone 이동·보관·정확 재호출 과정에서 보존한다. 사용자 정의 데이터는 객체의 출처, Scope 소속 또는 Zone 배치를 변경하는 권한이 아니다. 기본 Agent view에는 이 데이터를 싣지 않고, 객체를 명시적으로 읽는 외부 구현이 활용할 수 있게 한다.
+
 새 출력 직후에는 무엇을 작업 객체로 추출할지 알기 어렵다. 매 출력마다 연속된 Objectizer 호출로 즉시 구조화하면 비용이 들고 정보가 빠질 수 있다. Raw는 먼저 수명을 거쳐 관찰된다. Structured가 생겨도 Raw는 정확히 보존되며, 부분 추출이나 보류가 나머지 Raw를 대체하지 않는다.
 
 Zone 안에서는 Raw와 Structured가 각각 Hot 또는 Cold에 있을 수 있다. 둘 다 Cooling 후보가 될 수 있고, 함께 생성됐다는 이유로 동시에 이동하지 않는다.
@@ -128,6 +130,8 @@ Major collection은 Cooling Context의 정확한 payload를 Cold에서 접근할
 ### ColdCatalog, Cold compaction과 ColdBacking
 
 `ColdCatalog`는 ColdZone의 객체와 그곳에서 Backing으로 내보낸 객체의 탐색 경계다. Context가 ColdZone에 들어오면 Scope와 객체 식별·출처·위치를 가리키는 항목을 구성한다. Cold Compaction에서 만들어진 Scope 요약과 그 요약이 반영한 객체·revision의 범위도 관리한다. 한 Scope의 일부만 Cold에 도달했다면 요약은 그 일부의 요약이며 Scope 전체를 대표한다고 주장하지 않는다. ColdCatalog는 payload를 담는 공간도, Backing의 저장 구현도 아니다.
+
+Scope 요약도 사용자가 정의한 타입의 데이터를 가질 수 있다. 요약 내용·참조·반영 범위는 Runtime이 검증하며, 사용자 데이터는 의미를 해석하지 않고 요약과 함께 보존·조회한다. 외부 Memory 계층은 Catalog의 근거 범위와 Backing에서 재호출한 객체를 사용할 수 있으나, Memory 가치와 identity의 결정은 ContextCollector 밖에 있다.
 
 Cold compaction은 ColdZone의 watermark를 계기로, Zone이 직접 보유하는 payload의 점유를 관리한다. `ColdCompactor`는 ScopeBlock을 같은 Scope의 후보를 모으는 단위로 사용한다. 선택된 부분에서 Objectization과 Scope 요약을 수행할 수 있다. Scope 요약은 작업의 연속성과 탐색을 위한 파생 정보이며 Raw나 Structured를 대체하거나 새로운 Representation이 되지 않는다. 요약의 근거와 반영 범위를 검증하고, 정확한 재호출을 확인한 뒤 ColdCatalog의 위치를 갱신하고 해당 객체를 ColdZone에서 제거한다. 준비 중에는 기존 Cold 접근을 유지한다. Agent의 현재 응답을 막지 않는 비동기 작업이다.
 

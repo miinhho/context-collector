@@ -58,7 +58,7 @@ impl TokenUsage {
         self.raw + self.structured
     }
 
-    fn add(&mut self, entry: &ZoneEntry) {
+    fn add<Data>(&mut self, entry: &ZoneEntry<Data>) {
         if entry.raw {
             self.raw += entry.tokens;
         } else {
@@ -66,7 +66,7 @@ impl TokenUsage {
         }
     }
 
-    fn subtract(&mut self, entry: &ZoneEntry) {
+    fn subtract<Data>(&mut self, entry: &ZoneEntry<Data>) {
         if entry.raw {
             self.raw -= entry.tokens;
         } else {
@@ -76,10 +76,10 @@ impl TokenUsage {
 }
 
 #[derive(Clone, Debug)]
-pub struct ZoneEntry {
+pub struct ZoneEntry<Data = ()> {
     pub(crate) id: ContextId,
     pub(crate) scope: ScopeId,
-    pub(crate) object: ContextObject,
+    pub(crate) object: ContextObject<Data>,
     pub(crate) tokens: usize,
     pub(crate) raw: bool,
     pub(crate) born_turn: u64,
@@ -88,8 +88,13 @@ pub struct ZoneEntry {
     pub(crate) protected: bool,
 }
 
-impl ZoneEntry {
-    pub(crate) fn new(object: ContextObject, scope: ScopeId, tokens: usize, turn: u64) -> Self {
+impl<Data> ZoneEntry<Data> {
+    pub(crate) fn new(
+        object: ContextObject<Data>,
+        scope: ScopeId,
+        tokens: usize,
+        turn: u64,
+    ) -> Self {
         Self {
             id: object.id,
             scope,
@@ -129,15 +134,15 @@ impl ScopeBlock {
 }
 
 #[derive(Debug)]
-pub struct ContextHeapSpace {
+pub struct ContextHeapSpace<Data = ()> {
     kind: ZoneKind,
     watermark: Watermark,
-    entries: BTreeMap<ContextId, ZoneEntry>,
+    entries: BTreeMap<ContextId, ZoneEntry<Data>>,
     blocks: Vec<ScopeBlock>,
     usage: TokenUsage,
 }
 
-impl ContextHeapSpace {
+impl<Data> ContextHeapSpace<Data> {
     fn new(kind: ZoneKind, watermark: Watermark) -> Self {
         Self {
             kind,
@@ -164,11 +169,11 @@ impl ContextHeapSpace {
         self.usage.total() >= self.watermark.high
     }
 
-    pub fn get(&self, id: ContextId) -> Option<&ZoneEntry> {
+    pub fn get(&self, id: ContextId) -> Option<&ZoneEntry<Data>> {
         self.entries.get(&id)
     }
 
-    pub(crate) fn get_mut(&mut self, id: ContextId) -> Option<&mut ZoneEntry> {
+    pub(crate) fn get_mut(&mut self, id: ContextId) -> Option<&mut ZoneEntry<Data>> {
         self.entries.get_mut(&id)
     }
 
@@ -184,11 +189,11 @@ impl ContextHeapSpace {
             .collect()
     }
 
-    pub fn entries(&self) -> impl Iterator<Item = &ZoneEntry> {
+    pub fn entries(&self) -> impl Iterator<Item = &ZoneEntry<Data>> {
         self.entries.values()
     }
 
-    pub(crate) fn insert(&mut self, entry: ZoneEntry) -> Result<(), ZoneEntry> {
+    pub(crate) fn insert(&mut self, entry: ZoneEntry<Data>) -> Result<(), ZoneEntry<Data>> {
         if self.entries.contains_key(&entry.id) {
             return Err(entry);
         }
@@ -209,7 +214,7 @@ impl ContextHeapSpace {
         Ok(())
     }
 
-    pub(crate) fn remove(&mut self, id: ContextId) -> Option<ZoneEntry> {
+    pub(crate) fn remove(&mut self, id: ContextId) -> Option<ZoneEntry<Data>> {
         let entry = self.entries.remove(&id)?;
         self.usage.subtract(&entry);
         if let Some(index) = self
@@ -227,11 +232,11 @@ impl ContextHeapSpace {
 }
 
 #[derive(Debug)]
-pub struct ContextHeap {
-    zones: [ContextHeapSpace; 5],
+pub struct ContextHeap<Data = ()> {
+    zones: [ContextHeapSpace<Data>; 5],
 }
 
-impl ContextHeap {
+impl<Data> ContextHeap<Data> {
     pub fn new(watermarks: [Watermark; 5]) -> Option<Self> {
         if watermarks.iter().any(|mark| !mark.valid()) {
             return None;
@@ -243,15 +248,15 @@ impl ContextHeap {
         })
     }
 
-    pub fn zone(&self, kind: ZoneKind) -> &ContextHeapSpace {
+    pub fn zone(&self, kind: ZoneKind) -> &ContextHeapSpace<Data> {
         &self.zones[kind.index()]
     }
 
-    pub(crate) fn zone_mut(&mut self, kind: ZoneKind) -> &mut ContextHeapSpace {
+    pub(crate) fn zone_mut(&mut self, kind: ZoneKind) -> &mut ContextHeapSpace<Data> {
         &mut self.zones[kind.index()]
     }
 
-    pub fn find(&self, id: ContextId) -> Option<(ZoneKind, &ZoneEntry)> {
+    pub fn find(&self, id: ContextId) -> Option<(ZoneKind, &ZoneEntry<Data>)> {
         ZoneKind::ALL
             .iter()
             .find_map(|kind| self.zone(*kind).get(id).map(|entry| (*kind, entry)))

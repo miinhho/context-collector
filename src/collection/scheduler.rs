@@ -28,7 +28,7 @@ impl CollectionScheduler {
         self.pending.pop_front()
     }
 
-    pub fn schedule(&mut self, heap: &ContextHeap, scopes: &Scopes, hot_high: usize) {
+    pub fn schedule<Data>(&mut self, heap: &ContextHeap<Data>, scopes: &Scopes, hot_high: usize) {
         let hot_pressure = heap.hot_usage() >= hot_high;
         tracing::debug!(
             hot_usage = heap.hot_usage(),

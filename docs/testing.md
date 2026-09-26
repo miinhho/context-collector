@@ -2,28 +2,15 @@
 
 ## 판정 범위
 
-Runtime 테스트는 합성 입력과 상태 전환으로 판정할 수 있는 계약을 검사한다. 실제 모델을 호출하거나 Agent가 수행한 turn을 재현하지 않는다. Agent의 `scope` 보고가 의미상 옳은지, Structured 추출이 유용한지, Scope 요약문이 충실한지는 Runtime이 알 수 없다. Runtime은 주입된 값의 시점, 출처, revision, Scope 경계, 보관·재호출을 검증한다. 의미 품질 평가는 실제 Agent·Objectizer·Summarizer를 연결할 때 별도 평가 대상으로 둔다.
+`tests/`는 공개 Runtime API에 합성 turn 보고와 사용자 구현 Objectizer·Summarizer·Backing을 주입한다. 실제 Agent가 생성한 보고나 실제 모델 출력의 의미 품질은 검증하지 않는다.
 
-## 공통 검사기
+## 기계적 계약
 
-`src/runtime/invariant_tests.rs`의 검사기는 주요 작업 전후에 다음 조건을 동일하게 적용한다.
+| 검사 파일 | 확인하는 경계 |
+| --- | --- |
+| `tests/runtime_contract.rs` | 64개 합성 Scope 보고 시퀀스의 turn 배정과 Raw 접근, 모르는 `uses` 거부, watermark 이후 Structured 생성, Raw·Structured 계측, Cold 요약의 일부 반영 범위, ColdCatalog와 Backing을 통한 재호출 및 Agent용 View |
+| `tests/failure_contract.rs` | 근거 없는 Structured 제안, Scope 밖의 요약 근거, 저장·정확 재호출 실패, 비동기 Objectization·Cold 준비 중 보호 상태 변경에서 canonical payload 유지 |
+| `tests/custom_work.rs` | 사용자 구현체의 Scope·Zone 입력, 타입 있는 Structured 데이터, 같은 근거의 중복 생성 방지, Cold Backing과 Scope 요약 데이터의 왕복, 사용자 데이터 변조 거부와 외부 오류 출처 보존 |
+| `tests/token_counter.rs` | `o200k_base` 토큰 계측이 바이트 길이와 다른 입력 |
 
-- 객체 ID는 정확히 한 Zone 또는 Backing에 존재하고, 정확히 한 Scope에 소속된다.
-- Zone의 ScopeBlock과 실제 객체 집합이 같으며 Raw·Structured별 token 합계가 Zone 계측과 같다.
-- ColdZone 객체는 ColdCatalog에 ColdZone 위치로 등록되고, Backing 항목은 어떤 Zone에도 남지 않으며 정확히 다시 읽힌다.
-- Scope 요약의 근거 ID와 revision은 해당 Scope의 Catalog 항목과 일치한다. 요약 문장의 의미는 판정하지 않는다.
-
-## 결정적 시나리오
-
-| 경계 | 입력·조작 | 기계적으로 확인할 결과 |
-| --- | --- | --- |
-| 수동 주입한 보고와 Scope | 가짜 사용자·Agent 문자열과 `CONTINUE`·`TRANSITION`·`UNCERTAIN`·보고 없음의 3회 호출 조합 64개 | 보고 값에 따른 Scope 배정, 이전 객체 소속 불변, 작업 뒤 유일한 위치와 원본 payload |
-| watermark와 이동 | 낮은 watermark로 예약 작업을 순서대로 실행 | 보호된 객체 보존, 대상 Zone 계측, 다음 작업 예약, 유한한 작업 종료 |
-| Representation | 고정된 Structured 제안을 수용 | Raw 보존, 같은 Scope·Zone 생성, Raw·Structured token 각각 반영 |
-| 늦은 Objectization | 제안 준비 뒤 출처 객체 이동 | 오래된 제안 거부, 기존 객체 접근 유지 |
-| Cold 후보 선정 | 서로 다른 두 Scope를 Cold에 배치 | Scope별 batch의 ID가 섞이지 않고 한 Scope 이관이 다른 Scope를 변경하지 않음 |
-| 요약 결과 수용 | 고정 문자열과 근거 ID를 반환하는 가짜 Summarizer | 선택된 cohort 밖의 근거 거부, 수용한 문자열·근거·revision 범위의 정확한 전달 |
-| 비동기 확정 | 준비 뒤 보호 상태 변경, 저장 실패 또는 불일치 재호출 | 확정 거부, ColdZone payload와 Catalog 위치 유지 |
-| Agent용 view | token 예산과 명시적 Cold ID 제공 | 예산 초과 없음, Scope 단위 투영, 원본의 정확한 재호출 |
-
-고정 문자열을 반환하는 가짜 Summarizer는 요약 내용의 품질을 검증하는 수단이 아니다. 요약 결과가 잘못된 Scope나 revision에 연결되지 않는지만 확인한다. 전체 Agent workflow 검증은 이 기계적 계약 위에서 별도로 수행한다.
+불변식 검사는 공개 조회 결과와 실패 시 상태 보존을 기준으로 한다. ScopeBlock의 내부 배열 배치, Agent 보고의 의미적 타당성, Structured 추출의 유용성, Scope 요약의 충실성은 이 검사로 판정하지 않는다. 실제 모델 turn을 이용한 평가는 Agent와 LLM 서비스를 연결했을 때 별도로 수행해야 한다.

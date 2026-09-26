@@ -29,22 +29,28 @@ ContextHeap
 각 Zone: ContextHeapSpace 공통 기반
   └─ ScopeBlock들 → ContextObject들(RawObject / StructuredObject)
 
+ColdCatalog (Runtime의 Cold 탐색 인덱스)
+  ├─ Scope별 요약과 근거 범위
+  ├─ ColdZone의 Context 위치
+  └─ ColdBacking으로 내보낸 Context의 위치
+ColdCompactor: ColdZone → ColdBacking (ContextHeap 바깥의 보관·재호출 경계)
+
 Scope: Zone들을 가로지르는 ContextObject의 논리적 소속
 
 Zone 점유와 turn 관측 → CollectionScheduler
   ├─ Collection: Zone 사이의 이동
-  └─ Compaction: Objectization과 Cold 보관 정리
+  └─ Compaction: Objectization, Cold Scope 요약과 보관 정리
 ```
 
 ### ContextHeap과 Zone
 
 `ContextHeap`은 다섯 Zone을 묶는 런타임 작업공간이다. 객체별 이동 정책이나 Objectization 판단을 중앙에서 소유하지 않는다.
 
-`ContextHeapSpace`는 Zone의 공통 기반이다. 각 Zone은 현재 배치된 객체를 보관하고 조회하며, Scope별 객체 묶음과 token 점유를 계측한다. Zone은 watermark 압력을 알리지만 스스로 Collection이나 Compaction을 실행하지 않는다. 객체의 현재 Zone은 Zone의 소속 관계로 표현하며, Heap과 ContextObject에 별도의 변경 가능한 배치 목록을 두지 않는다.
+`ContextHeapSpace`는 Zone의 공통 기반이다. 각 Zone은 현재 배치된 객체를 보관하고 조회하며, Scope별 객체 묶음과 token 점유를 계측한다. Zone은 watermark 압력을 알리지만 스스로 Collection이나 Compaction을 실행하지 않는다. 객체의 현재 Zone은 Zone의 소속 관계로 표현하며, Heap과 ContextObject에 별도의 변경 가능한 배치 목록을 두지 않는다. Backing으로 보낸 객체는 어느 Zone에도 남기지 않는다.
 
 ### Scope와 ScopeBlock
 
-`Scope`는 논리적 작업의 소유 경계이며, 그 작업에 속한 ContextObject들의 묶음을 가진다. 한 Scope의 객체는 여러 Zone에 걸쳐 있을 수 있다. 다른 Scope에서 객체를 참조하거나 사용해도 원래 Scope 소속은 바뀌지 않는다. Runtime의 현재 Scope 전환은 명시적으로 처리하며 기존 객체의 소속을 자동으로 바꾸지 않는다.
+`Scope`는 논리적 작업의 소유 경계이며, 그 작업에 속한 ContextObject들의 묶음을 가진다. 한 Scope의 객체는 여러 Zone에 걸쳐 있을 수 있다. Backing으로 내보낸 객체의 Scope 출처는 ColdCatalog에 남지만 Zone의 ScopeBlock에는 남지 않는다. 다른 Scope에서 객체를 참조하거나 사용해도 원래 Scope 소속은 바뀌지 않는다. Runtime의 현재 Scope 전환은 명시적으로 처리하며 기존 객체의 소속을 자동으로 바꾸지 않는다.
 
 각 Zone은 같은 Scope의 객체를 인접하게 탐색할 수 있도록 `ScopeBlock`으로 묶는다. ScopeBlock은 Zone 내부의 배치·탐색 구조다. 한 Scope가 한 Zone에 여러 Block을 가질 수 있고, 작업은 Block 안의 일부 객체만 처리할 수 있다. Block은 독립된 도메인 소유권, lifecycle, 영속적 identity 또는 원자적 이동 단위가 아니다.
 
@@ -59,7 +65,7 @@ Scope는 Collection과 Compaction이 후보를 모으는 공통 경계다. Scope
 
 새 출력 직후에는 무엇을 작업 객체로 추출할지 알기 어렵다. 매 출력마다 연속된 Objectizer 호출로 즉시 구조화하면 비용이 들고 정보가 빠질 수 있다. Raw는 먼저 수명을 거쳐 관찰된다. Structured가 생겨도 Raw는 정확히 보존되며, 부분 추출이나 보류가 나머지 Raw를 대체하지 않는다.
 
-Raw와 Structured는 각각 Hot 또는 Cold에 있을 수 있다. 둘 다 Cooling 후보가 될 수 있고, 함께 생성됐다는 이유로 동시에 이동하지 않는다.
+Zone 안에서는 Raw와 Structured가 각각 Hot 또는 Cold에 있을 수 있다. 둘 다 Cooling 후보가 될 수 있고, 함께 생성됐다는 이유로 동시에 이동하지 않는다.
 
 ## Lifecycle과 배치
 
@@ -80,12 +86,12 @@ Cooling의 준비 작업이 실패하거나 오래 걸려도 기존 Context 접�
 
 ## Agent 보고와 Context view
 
-Runtime은 요청마다 `TokenSpace` 안에서 `ContextView`를 구성한다. 현재 Scope의 필요한 Hot Raw·Structured, 최근 또는 명시적으로 사용된 Context, 간략한 Cold catalog, 명시적으로 불러온 Cold Context를 포함할 수 있다. Raw는 실제 payload로, Structured는 객체화된 표현과 출처로 전달한다. TokenSpace는 한 요청의 view 크기이며 Zone별 token 점유와 다르다.
+Runtime은 요청마다 `TokenSpace` 안에서 `ContextView`를 구성한다. 현재 Scope의 필요한 Hot Raw·Structured, 최근 또는 명시적으로 사용된 Context, 관련 있는 Cold Scope 요약과 명시적으로 불러온 Context를 포함할 수 있다. Agent에게는 탐색에 필요한 Scope 요약과 근거 참조만 선별해 보여주며 ColdCatalog의 객체별 색인이나 보관 위치를 그대로 노출하지 않는다. Raw는 실제 payload로, Structured는 객체화된 표현과 출처로 전달한다. TokenSpace는 한 요청의 view 크기이며 Zone별 token 점유와 다르다.
 
 Agent는 메시지와 함께 turn 단위의 `uses`와 `scope`를 보고한다. Runtime은 이를 `TurnObservation`으로 받아들인다. 이 보고는 추가 Objectizer 호출 없이 얻는 관측이며 lifecycle 이동 명령은 아니다.
 
 - `uses`는 실제 사용했다고 보고한 ContextObject의 식별이다. 다른 Scope의 객체를 사용해도 소유권은 바뀌지 않는다. 목록에 없거나 보고가 없다는 사실만으로 미사용이라고 판단하지 않는다.
-- `scope`는 이번 turn과 요청 시작 시점의 현재 Scope 사이의 관계다. `CONTINUE`는 같은 논리적 작업의 연속, `TRANSITION`은 다른 논리적 작업으로 넘어가는 명시적인 경계 관측, `UNCERTAIN`은 판단하기 어려움을 뜻한다. Agent는 Scope ID를 정하지 않는다. 전환 보고만으로 기존 객체의 소속을 옮기지 않고, 불확실하거나 보고가 없다는 이유로 전환을 추정하지 않는다.
+- `scope`는 이번 사용자 입력과 Agent 응답으로 이뤄진 turn 전체와 요청 시작 시점의 현재 Scope 사이의 관계다. `CONTINUE`는 이번 Raw를 현재 Scope에 소속시키고, `TRANSITION`은 Runtime이 새 Scope를 만들어 이번 Raw를 그 Scope에 소속시키며, `UNCERTAIN`은 현재 Scope를 유지하되 이 보고를 Cooling 선정의 긍정적 근거로 사용하지 않는다. Agent는 Scope ID를 정하지 않는다. 기존 객체의 소속은 전환 보고로 옮기지 않는다. 이전 Scope로 복귀하려면 Runtime에 대한 별도의 명시적인 선택이 필요하다. 보고가 없다는 이유로 전환을 추정하지 않는다.
 
 보고는 응답과 함께 도착하므로 이미 구성된 이번 요청의 view에는 소급 적용되지 않는다. Runtime은 사용자·Agent의 Raw를 수용하고 관측을 갱신한 뒤, 다음 view와 Collection·Compaction 판단에 보고를 반영한다.
 
@@ -95,6 +101,8 @@ Agent는 메시지와 함께 turn 단위의 `uses`와 `scope`를 보고한다. R
 
 Hot 내부의 이동은 한 Zone의 점유를 낮춰도 Hot 전체 점유를 줄이지 않을 수 있다. Scheduler는 각 Zone의 압력과 Hot Zone 합계도 관찰한다. 안전한 후보가 없거나 준비가 실패하면 `low`에 도달하지 못할 수 있다. 그 이유로 원본을 손실시키거나 보호 중인 Context를 강제로 이동시키지 않는다.
 
+Collection이나 Compaction이 Zone 점유를 바꾸면 Scheduler는 변경된 점유를 기준으로 후속 작업을 검토한다. 후속 검토는 다음 turn에 종속되지 않는다.
+
 Collection과 Compaction은 ScopeBlock으로 같은 Scope의 후보를 탐색하지만 Block 전체를 한꺼번에 처리할 의무는 없다.
 
 ### Minor collection
@@ -103,9 +111,9 @@ Minor collection은 Eden과 Survivor의 Context를 구조적 사실에 따라 Su
 
 ### 공통 Objectization과 Hot compaction
 
-`Objectization`은 Raw에서 Structured를 추출하는 공통 작업이다. 교체 가능한 외부 Objectizer가 제안한 결과의 Raw 출처와 현재 revision을 검증한다. 여러 객체로 나눈 결과, 일부만 처리한 결과, 전체 보류를 허용한다. 오래되거나 근거가 맞지 않는 결과는 canonical Context로 받아들이지 않는다.
+`Objectization`은 한 Zone 안의 같은 Scope에 속한 Raw에서 Structured를 추출하는 공통 작업이다. 교체 가능한 외부 Objectizer가 제안한 결과의 Raw 출처와 현재 revision을 검증한다. 여러 객체로 나눈 결과, 일부만 처리한 결과, 전체 보류를 허용한다. 결과를 수용할 때 출처 Raw의 revision, Scope, Zone이 모두 그대로여야 한다. 오래되거나 근거가 맞지 않는 결과는 canonical Context로 받아들이지 않는다.
 
-Hot compaction은 Hot 압력이 커지고 충분한 수명을 거친 Raw가 있을 때, Scope를 기준으로 Raw 집합을 골라 Objectization을 사용한다. 받아들인 Structured는 같은 Scope의 Hot Context가 된다. Objectization 자체는 Zone 이동이나 Memory 가치 판정을 맡지 않는다.
+Hot compaction은 Hot 압력이 커지고 충분한 수명을 거친 Raw가 있을 때, 하나의 Zone과 ScopeBlock 안에서 Raw 집합을 골라 Objectization을 사용한다. 받아들인 Structured는 출처 Raw와 같은 Scope와 Zone에 생성된다. Objectization 자체는 Zone 이동이나 Memory 가치 판정을 맡지 않는다.
 
 ### Scope를 기준으로 한 Cooling 이동
 
@@ -117,17 +125,19 @@ RawObject와 StructuredObject 모두 Cooling으로 이동할 수 있다. `uses`�
 
 Major collection은 Cooling Context의 정확한 payload를 Cold에서 접근할 수 있게 준비하고 Hot 점유를 해소한다. 의미를 생성하지 않는다. 준비 중에는 기존 Cooling 객체가 계속 읽혀야 하며 안전하게 완료된 시점에만 Cold 이동을 확정한다.
 
-### Cold compaction과 ColdBacking
+### ColdCatalog, Cold compaction과 ColdBacking
 
-Cold compaction은 ColdZone의 watermark를 계기로, Zone이 직접 보유하는 payload의 점유를 관리한다. `ColdCompactor`는 Cold Context를 교체 가능한 `ColdBacking`에 보관하고 catalog를 통해 탐색·재호출할 경로를 유지한다. 정확한 보관과 재호출이 준비되기 전에는 기존 Cold 접근을 해제하지 않는다. Agent의 현재 응답을 막지 않는 비동기 작업이다.
+`ColdCatalog`는 ColdZone의 객체와 그곳에서 Backing으로 내보낸 객체의 탐색 경계다. Context가 ColdZone에 들어오면 Scope와 객체 식별·출처·위치를 가리키는 항목을 구성한다. Cold Compaction에서 만들어진 Scope 요약과 그 요약이 반영한 객체·revision의 범위도 관리한다. 한 Scope의 일부만 Cold에 도달했다면 요약은 그 일부의 요약이며 Scope 전체를 대표한다고 주장하지 않는다. ColdCatalog는 payload를 담는 공간도, Backing의 저장 구현도 아니다.
 
-ColdBacking의 첫 구현은 in-memory map이다. 이는 저장·탐색 계약을 안정적으로 구체화하고 구현을 교체할 수 있게 하기 위한 선택이다. 파일 기반 map 등으로 바뀌어도 정확한 payload 보존과 재호출 규칙은 같다. Backing에 보관해도 Context의 lifecycle은 Cold이고, 같은 Workspace에서 찾을 수 있다.
+Cold compaction은 ColdZone의 watermark를 계기로, Zone이 직접 보유하는 payload의 점유를 관리한다. `ColdCompactor`는 ScopeBlock을 같은 Scope의 후보를 모으는 단위로 사용한다. 선택된 부분에서 Objectization과 Scope 요약을 수행할 수 있다. Scope 요약은 작업의 연속성과 탐색을 위한 파생 정보이며 Raw나 Structured를 대체하거나 새로운 Representation이 되지 않는다. 요약의 근거와 반영 범위를 검증하고, 정확한 재호출을 확인한 뒤 ColdCatalog의 위치를 갱신하고 해당 객체를 ColdZone에서 제거한다. 준비 중에는 기존 Cold 접근을 유지한다. Agent의 현재 응답을 막지 않는 비동기 작업이다.
 
-ColdCompactor는 필요하면 공통 Objectization으로 Cold Raw에서 Structured를 추출해 탐색 가능성을 개선할 수 있다. Raw 원본은 계속 보존한다. Catalog나 backing을 만드는 일은 장기 Memory 시스템으로 승격하거나 Memory 가치를 판단하는 일이 아니다.
+`ColdBacking`은 ContextHeap과 Runtime의 Zone lifecycle 밖에 있는 보관·재호출 경계다. 저장 구현은 in-memory map, file map 등으로 교체할 수 있으며 저장 방식은 ColdCatalog의 탐색 책임을 바꾸지 않는다. Backing으로 내보낸 객체는 ColdZone에도 남지 않고 Runtime의 Objectization 대상도 아니다. Backing은 새 Zone이나 Memory identity가 아니다.
+
+ColdCompactor는 필요하면 내보내기 전 ColdZone의 같은 Scope Raw에서 공통 Objectization으로 Structured를 추출해 같은 ColdZone에 생성하고 탐색 가능성을 개선할 수 있다. Raw 원본은 계속 보존한다. ColdCatalog와 ColdBacking은 장기 Memory 시스템으로 승격하거나 Memory 가치를 판단하지 않는다.
 
 ## 외부 경계와 불변식
 
-Objectizer 구현, token 계산기, Agent/provider adapter, ColdBacking 구현, catalog 검색 방식, Context wire format은 교체 가능한 외부 경계다. 외부 구현은 결과를 제안하거나 payload를 보관할 수 있지만 Scope 소속과 lifecycle을 임의로 변경하지 않는다.
+Objectizer 구현, token 계산기, Agent/provider adapter, ColdBacking 구현, Context wire format은 교체 가능한 외부 경계다. ColdCatalog의 검색 방식도 교체할 수 있지만 탐색 책임은 Runtime에 남는다. 외부 구현은 결과를 제안하거나 payload를 보관할 수 있지만 Scope 소속과 lifecycle을 임의로 변경하지 않는다.
 
 - Raw payload는 정확하게 다시 읽을 수 있다.
 - 새 Raw를 선제적으로 요약하거나 객체화하지 않는다.
@@ -136,5 +146,5 @@ Objectizer 구현, token 계산기, Agent/provider adapter, ColdBacking 구현, 
 - Scope 전환이나 watermark 도달만으로 Context를 강제로 Cooling으로 보내지 않는다.
 - Structured는 정확한 Raw 근거를 가지며 부분 추출은 전체 Raw를 대체하지 않는다.
 - 비동기 준비가 끝나기 전에 canonical Context의 접근이나 lifecycle을 바꾸지 않는다.
-- Cold Context는 catalog로 탐색하고 정확한 payload를 다시 불러올 수 있다.
+- ColdZone에 남은 Context와 Backing으로 내보낸 Context는 ColdCatalog로 탐색하고 정확한 payload를 다시 불러올 수 있다.
 - ContextCollector는 Memory 가치와 Memory identity를 결정하지 않는다.
